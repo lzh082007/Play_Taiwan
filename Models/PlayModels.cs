@@ -319,4 +319,21 @@ namespace backend.Models
         public List<string> photo_urls { get; set; }
         public string maps_deeplink_url { get; set; }
     }
+
+    public class LocationRequest
+    {
+        public double lat { get; set; }
+        public double lng { get; set; }
+        public double? accuracy { get; set; }
+    }
+
+    public class LocationResponse
+    {
+        public double lat { get; set; }
+        public double lng { get; set; }
+        public double? accuracy { get; set; }
+        public string city_name { get; set; }
+        public string district_name { get; set; } 
+        public DateTime received_at { get; set; }
+    }
 }

@@ -4,6 +4,9 @@ using System.Linq;
 using System.Security.Claims;
 using backend.dao;
 using backend.Models;
+using System.Net.Http;
+using System.Threading.Tasks;
+using Newtonsoft.Json.Linq;
 
 namespace backend.Services
 {
@@ -277,5 +280,71 @@ namespace backend.Services
         }
 
         #endregion
+
+        #region 回報定位
+
+        public async Task<LocationResponse> ReportLocationAsync(LocationRequest req)
+        {
+            if (req == null)
+            {
+                throw new ArgumentException("請提供定位資料。");
+            }
+
+            if (req.lat < -90 || req.lat > 90 || req.lng < -180 || req.lng > 180)
+            {
+                throw new ArgumentException("經緯度超出有效範圍。");
+            }
+
+            var (cityName, districtName) =
+                await ResolveTaiwanAreaAsync(req.lat, req.lng);
+
+            return new LocationResponse
+            {
+                lat = req.lat,
+                lng = req.lng,
+                accuracy = req.accuracy,
+                city_name = cityName,
+                district_name = districtName,
+                received_at = DateTime.UtcNow
+            };
+        }
+
+        #endregion
+
+        private async Task<(string city, string district)> ResolveTaiwanAreaAsync(double lat, double lng)
+        {
+            string url =
+                "https://nominatim.openstreetmap.org/reverse" +
+                $"?format=json&lat={lat}&lon={lng}&accept-language=zh-TW";
+
+            using var http = new HttpClient();
+            http.DefaultRequestHeaders.UserAgent.ParseAdd(
+                "PlayTaiwan/1.0 (local-dev)");
+
+            string json = await http.GetStringAsync(url);
+            JObject root = JObject.Parse(json);
+            JToken address = root["address"];
+
+            if (address == null)
+            {
+                return (null, null);
+            }
+
+            // 縣市：直轄市/市/縣
+            string city =
+                address.Value<string>("city") ??
+                address.Value<string>("county") ??
+                address.Value<string>("state");
+
+            // 區／鄉／鎮
+            string district =
+                address.Value<string>("suburb") ??
+                address.Value<string>("city_district") ??
+                address.Value<string>("town") ??
+                address.Value<string>("municipality") ??
+                address.Value<string>("village");
+
+            return (city, district);
+        }
     }
 }

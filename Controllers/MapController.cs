@@ -6,6 +6,7 @@ using Microsoft.Extensions.Logging;
 using backend.Models;
 using backend.Services;
 using backend.ViewModels;
+using System.Threading.Tasks;
 
 namespace backend.Controllers
 {
@@ -336,5 +337,45 @@ namespace backend.Controllers
         }
 
         #endregion
+
+        /// <summary>
+        /// 取得使用者現在所在位置
+        /// </summary>
+        [AllowAnonymous]
+        [HttpPost("Location")]
+        public async Task<IActionResult> ReportLocation([FromBody] LocationRequest req)
+        {
+            try
+            {
+                LocationResponse result =
+                    await _service.ReportLocationAsync(req);
+
+                return Ok(new ResultViewModel<LocationResponse>
+                {
+                    isSuccess = true,
+                    message = "定位接收成功",
+                    Result = result
+                });
+            }
+            catch (ArgumentException e)
+            {
+                return BadRequest(new ResultViewModel<LocationResponse>
+                {
+                    isSuccess = false,
+                    message = e.Message,
+                    Result = null
+                });
+            }
+            catch (Exception e)
+            {
+                _logger.LogError(e, "接收定位失敗");
+                return BadRequest(new ResultViewModel<LocationResponse>
+                {
+                    isSuccess = false,
+                    message = e.Message,
+                    Result = null
+                });
+            }
+        }
     }
 }
