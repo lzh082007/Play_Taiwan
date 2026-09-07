@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Threading.Tasks;
 using System.Collections;
 using System.Collections.Generic;
@@ -15,8 +15,8 @@ using MySql.Data.MySqlClient;
 namespace backend.dao
 {
     /// <summary>
-    /// 隞餃?蝑??賊?鞈?摮?撅扎?
-    /// ?芾?鞎祆閰?撖怠鞈?摨恬?銝?隞颱?璆剖??斗嚗撠?獢??摩??Services/TaskVerificationService嚗?
+    /// 任務相關資料庫存取操作。
+    /// 包含查詢景點座標、獲取提示內容等。
     /// </summary>
     public class TaskDao(IOptions<AppSettings> app_settings_obj, Neo4jService neo4j_service_obj)
     {
@@ -24,16 +24,14 @@ namespace backend.dao
         private readonly MysqlConnect mysql_connect = new(app_settings_obj.Value.mydb);
         private readonly Neo4jService neo4j_service = neo4j_service_obj;
 
-
-        #region ??隞餃?閰單?
+        #region 查詢任務地點
 
         /// <summary>
-        /// 靘?task_id ?亥岷隞餃?摰?批捆嚗???皞 md_task??
+        /// 依 task_id 查詢任務地點，關聯 md_task 表。
         /// </summary>
-
         public async Task<Location> GetPlaceLocation(string node_id)
         {
-            // 1. MySQL ?亥岷 place_id
+            // 1. MySQL 查詢 place_id
             Hashtable param = new()
             {
                 {"@node_id", new MySQLParameter(node_id, MySqlDbType.VarChar)}
@@ -45,7 +43,7 @@ namespace backend.dao
 
             List<SearchNeo4jReq> mysqlData = mysql_connect.GetDataList<SearchNeo4jReq>(sql, param);
 
-            // ?脣?嚗???MySQL ?曆??啗???? place_id ?箇征嚗??湔? null
+            // 若查詢結果無 place_id 則回傳 null
             if (mysqlData == null || mysqlData.Count == 0 || string.IsNullOrEmpty(mysqlData[0].place_id))
             {
                 return null;
@@ -54,7 +52,7 @@ namespace backend.dao
             string targetPlaceId = mysqlData[0].place_id;
             string targetStoryId = mysqlData[0].story_id;
 
-            // 2. 瑽遣 Neo4j ??Cypher ?亥岷嚗????舫?摨扳?嚗?
+            // 2. 建立 Neo4j Cypher 查詢
             string cypher = @"
                             MATCH (n)
                             WHERE (n:Attraction OR n:Event OR n:Hotel OR n:Restaurant)
@@ -63,13 +61,13 @@ namespace backend.dao
                                 coalesce(n.lon, n.PositionLon) AS Lon
                             LIMIT 1";
 
-            // 3. ?澆 Neo4jService ?瑁??亥岷
+            // 3. 執行 Neo4j 查詢
             var locationResult = await neo4j_service.ExecuteCypherAsync<List<Location>>(
                 cypher,
                 new { id = targetPlaceId }
             );
 
-            // 4. 閫???蝯?嚗蒂鋆? place_id ??story_id 靘?蝥蝙??
+            // 4. 若有結果，則附加 place_id 及 story_id 回傳
             if (locationResult != null && locationResult.Count > 0)
             {
                 locationResult[0].PlaceId = targetPlaceId;
@@ -77,17 +75,17 @@ namespace backend.dao
                 return locationResult[0];
             }
 
-            // ??銝蝯?嚗?憒???API 404 ??嚗??喳??怠?摨扳???Location 霈葫閰西???
+            // 若查無結果，回傳預設假座標供測試
             return new Location { PlaceId = targetPlaceId, StoryId = targetStoryId, Lat = 25.0456, Lon = 121.5123 };
         }
         #endregion
 
 
-        #region ???內
+        #region 取得提示
 
         /// <summary>
-        /// 靘??舀活?詨?敺???畾萇??內嚗???皞 md_task_hint??
-        /// trigger_wrong_count 頞??int_stage 頞之隞?”?內頞?蝣綽??泵??隞嗡葉??Ⅱ??蝑?
+        /// 依任務代號與錯誤次數取得對應提示，關聯 md_task_hint。
+        /// trigger_wrong_count 與 hint_stage 決定顯示哪一階段提示。
         /// </summary>
         public TaskHintResponse GetHintByWrongCount(string task_id, int wrongCount)
         {
@@ -109,7 +107,7 @@ namespace backend.dao
             return new TaskHintResponse
             {
                 task_id = task_id,
-                hint_text = hintText ?? "?????唳?蝷箄圾??蝑甈⊥",
+                hint_text = hintText ?? "目前沒有更多的提示內容了。",
                 is_available = hintText != null
             };
         }
@@ -121,10 +119,10 @@ namespace backend.dao
 
         #endregion
 
-        #region ????漲
+        #region 難度等級
 
         /// <summary>
-        /// 閮??拙振?刻府?啣??赤甈⊥嚗蒂靘?md_difficulty_prompt ??瑼餉?矽?湧摨行?蝑?
+        /// 紀錄玩家到訪地區的累積次數，並由 md_difficulty_prompt 的設定動態調整難度等級。
         /// </summary>
         public int RecordVisitAndGetDifficulty(string ep_id, string region_id)
         {
@@ -182,7 +180,7 @@ namespace backend.dao
             public int? max_star { get; set; }
         }
 
-        /// <summary>靘摨行?蝑?敺?銝策 LLM ?摰?蝷箏?璅⊥嚗???皞 md_difficulty_prompt??/summary>
+        /// <summary>由難度等級取得準備給 LLM 的對話提示範本，關聯 md_difficulty_prompt。</summary>
         public string GetDifficultyPrompt(int difficultyStar)
         {
             Hashtable param = new()
@@ -205,10 +203,10 @@ namespace backend.dao
 
         #endregion
 
-        #region ???賢?
+        #region 徽章抽選
 
         /// <summary>
-        /// 摰?蝭暺?靘?md_badge_pool ??????噬蝡?銝血神??ep_badge嚗?銴????嚗?
+        /// 完成節點時由 md_badge_pool 的權重隨機抽出徽章，並存入 ep_badge，若已擁有則不重複寫入。
         /// </summary>
         public string DrawBadge(string ep_id, string story_id)
         {
@@ -260,10 +258,10 @@ namespace backend.dao
 
         #endregion
 
-        #region ?梯??
+        #region 隱藏劇情
 
         /// <summary>
-        /// 靘摰嗥??GPS 摨扳?瑼Ｘ?臬閫貊閰脣?撠閫??????∴?閫貊敺神??ep_hidden_level_unlock??
+        /// 依玩家目前 GPS 座標檢查是否觸發隱藏劇情，且未曾觸發過，觸發後存入 ep_hidden_level_unlock。
         /// </summary>
         public HiddenLevelTriggerResult CheckHiddenLevelTrigger(string ep_id, double lat, double lng, string region_id)
         {
@@ -344,15 +342,15 @@ namespace backend.dao
         }
 
         #endregion
-        #region ?拙振隞餃?蝑?蝝??
+        #region 玩家任務答題紀錄
 
         /// <summary>
-        /// ?????Ｗ?冽?摰遙??歇蝑?活?詻?
-        /// ?交?∪??芷?憪迨隞餃?嚗?? 0??
+        /// 取得特定玩家在指定任務中已答錯的次數。
+        /// 若紀錄中未包含此任務，則回傳 0。
         /// </summary>
-        /// <param name="epId">?Ｗ隞????/param>
-        /// <param name="taskId">隞餃?隞????/param>
-        /// <returns>蝝舐?蝑甈⊥??/returns>
+        /// <param name="epId">玩家代號</param>
+        /// <param name="taskId">任務代號</param>
+        /// <returns>累積答錯次數</returns>
         public int GetWrongCount(string epId, string taskId)
         {
             Hashtable param = new()
@@ -377,13 +375,13 @@ namespace backend.dao
         }
 
         /// <summary>
-        /// ?拙振蝑?敞蝛隤斗活?詻?
-        /// ?仿?甈∠?憿??啣?蝝???亙歇???? wrong_count ????
+        /// 玩家答錯時增加答錯次數。
+        /// 若為首次錯誤將建立紀錄，若已存在則將 wrong_count 加一。
         /// </summary>
-        /// <param name="epId">?Ｗ隞????/param>
-        /// <param name="taskId">隞餃?隞????/param>
-        /// <param name="storyId">?撅砍??砌誨??/param>
-        /// <param name="nodeId">?撅祉?暺誨??/param>
+        /// <param name="epId">玩家代號</param>
+        /// <param name="taskId">任務代號</param>
+        /// <param name="storyId">故事代號</param>
+        /// <param name="nodeId">節點代號</param>
         public void IncreaseWrongCount(
             string epId,
             int    taskId,
@@ -429,13 +427,13 @@ namespace backend.dao
         }
 
         /// <summary>
-        /// ?拙振蝑??遣蝡??湔隞餃?摰?蝝??
-        /// 撌脩敞蝛??航炊甈⊥????靘?蝥摰嗉??箏??蝙?具?
+        /// 玩家答對後建立或更新任務完成紀錄。
+        /// 將清除之前的答錯次數歸零，並設定為已完成。
         /// </summary>
-        /// <param name="epId">?Ｗ隞????/param>
-        /// <param name="taskId">隞餃?隞????/param>
-        /// <param name="storyId">?撅砍??砌誨??/param>
-        /// <param name="nodeId">?撅祉?暺誨??/param>
+        /// <param name="epId">玩家代號</param>
+        /// <param name="taskId">任務代號</param>
+        /// <param name="storyId">故事代號</param>
+        /// <param name="nodeId">節點代號</param>
         public void MarkTaskCompleted(
             string epId,
             string taskId,
@@ -485,10 +483,10 @@ namespace backend.dao
 
         #endregion
 
-        #region 隞餃?憿??亥岷
+        #region 任務類型查詢
 
         /// <summary>
-        /// ?亥岷???舫??舀???遙????JOIN md_place_type + md_type嚗?
+        /// 查詢特定景點所屬的所有類別屬性，JOIN md_place_type + md_type。
         /// </summary>
         public List<PlaceTypeInfo> GetPlaceTypes(string place_id)
         {
@@ -515,10 +513,10 @@ namespace backend.dao
 
         #endregion
 
-        #region 隞餃??亥岷?神??
+        #region 任務查詢與寫入
 
         /// <summary>
-        /// ?亥岷??蝭暺?血歇摮隞餃?嚗撌脩?????亙??喉?銝?銴???
+        /// 查詢特定節點下的所有任務，若已完成則不再顯示。
         /// </summary>
         public List<TaskDetailResponse> GetTasksByNodeId(string node_id)
         {
@@ -705,8 +703,3 @@ namespace backend.dao
         #endregion
     }
 }
-
-
-
-
-
