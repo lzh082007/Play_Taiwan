@@ -347,8 +347,9 @@ namespace backend.Models
         /// <summary>使用者完成獲得的 Vlog 代號，若尚未生成則為 null</summary>
         public string vlog_id { get; set; }                            // 關聯的 Vlog 代號
 
-        /// <summary>明信片回顧頁面網址，若無則為 null</summary>
-        public string postcard_review_url { get; set; }                 // 明信片回顧頁面
+        /// <summary>明信片回顧頁面的連結，若無則為 null。</summary>
+        public string postcard_review_url { get; set; }                 // 明信片回顧連結
+        public List<string> spots { get; set; }
     }
 
     // ===================== 收藏 =====================
