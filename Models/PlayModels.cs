@@ -382,6 +382,7 @@ namespace backend.Models
         public List<double> JointAngles { get; set; } = new(); // 姿勢特徵的各關節角度陣列
     }
 
+
     /// <summary>
     /// 採訪任務語音轉文字識別，關聯 md_task.interview_script_json 解析後之結構。
     /// </summary>
@@ -390,6 +391,7 @@ namespace backend.Models
         public List<string> ExpectedKeywords { get; set; } = new(); // 店家/NPC對話中需包含的關鍵字陣列
     }
 
+
     /// <summary>
     /// 跨節點任務解鎖條件，關聯 md_task.hidden_unlock_condition_json 解析後之結構。
     /// </summary>
@@ -397,6 +399,7 @@ namespace backend.Models
     {
         public List<string> RequiredTaskIds { get; set; } = new(); // 解鎖此任務所需之前置 task_id 陣列
     }
+
 
     /// <summary>
     /// 隱藏劇情觸發檢查結果，關聯 md_hidden_level 表，依玩家 GPS 座標判斷是否進入範圍，若符合則返回劇情。
@@ -411,5 +414,24 @@ namespace backend.Models
         public string reward_badge_id { get; set; }               // 觸發後可獲得的徽章代號
         public string reward_postcard_id { get; set; }              // 觸發後可獲得的明信片代號
     }
-    
+
+
+    public class LocationRequest
+    {
+        public double lat { get; set; }
+        public double lng { get; set; }
+        public double? accuracy { get; set; }
+    }
+
+
+    public class LocationResponse
+    {
+        public double lat { get; set; }
+        public double lng { get; set; }
+        public double? accuracy { get; set; }
+        public string city_name { get; set; }
+        public string district_name { get; set; } 
+        public DateTime received_at { get; set; }
+    }
+
 }
