@@ -90,6 +90,9 @@ namespace backend.dao
             return list;
         }
 
+        /// <summary>
+        /// 新增明信片主檔。目前唯一呼叫來源是 GenerateAiPostcardAsync（AI 生成明信片時寫入）。
+        /// </summary>
         public async Task CreateAsync(PostcardCatalog entity)
         {
             const string sql = @"INSERT INTO md_postcard
@@ -106,28 +109,6 @@ namespace backend.dao
             await cmd.ExecuteNonQueryAsync();
         }
 
-        public async Task<bool> UpdateAsync(PostcardCatalog entity)
-        {
-            const string sql = @"UPDATE md_postcard SET
-                                  story_id = @story_id,
-                                  postcard_name = @postcard_name,
-                                  summary = @summary,
-                                  image_url = @image_url,
-                                  is_night_edition_default = @is_night_edition_default,
-                                  category = @category,
-                                  sort_order = @sort_order,
-                                  is_active = @is_active
-                                  WHERE postcard_id = @postcard_id";
-
-            using var conn = new MySqlConnection(_connectionString);
-            await conn.OpenAsync();
-            using var cmd = new MySqlCommand(sql, conn);
-            AddEntityParameters(cmd, entity);
-
-            var rows = await cmd.ExecuteNonQueryAsync();
-            return rows > 0;
-        }
-
         public async Task<bool> DeleteAsync(string postcardId)
         {
             const string sql = "DELETE FROM md_postcard WHERE postcard_id = @postcard_id";
@@ -141,12 +122,11 @@ namespace backend.dao
             return rows > 0;
         }
 
-      /// <summary>
+        /// <summary>
         /// 將生成的明信片綁定至玩家的收藏庫 (寫入 ep_postcard)
         /// </summary>
         public async Task BindPostcardToUserAsync(string epId, string postcardId)
         {
-            // ★ 只寫入核心的 ep_id 與 postcard_id，避免資料庫找不到欄位而報錯
             const string sql = @"INSERT INTO ep_postcard 
                                  (ep_id, postcard_id)
                                  VALUES 
@@ -155,7 +135,7 @@ namespace backend.dao
             using var conn = new MySqlConnection(_connectionString);
             await conn.OpenAsync();
             using var cmd = new MySqlCommand(sql, conn);
-            
+
             cmd.Parameters.AddWithValue("@ep_id", epId);
             cmd.Parameters.AddWithValue("@postcard_id", postcardId);
 
