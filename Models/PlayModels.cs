@@ -187,6 +187,17 @@ namespace backend.Models
         public int player_count { get; set; } // 遊玩人數
     }
 
+    /// <summary>
+    /// 測試用：手動觸發任務生成的請求。
+    /// 正式流程的任務生成是在 POST api/Story/GenerateAi 劇本存檔後自動執行。
+    /// </summary>
+    public class TaskGenerateReq
+    {
+        public string story_id { get; set; }     // 為整份劇本的所有節點生成
+        public string node_id { get; set; }      // 有值時只針對此節點生成（優先於 story_id）
+        public int player_count { get; set; }    // 遊玩人數，未給預設 2
+    }
+
     public class SearchNeo4jReq
     {
         public string place_id { get; set; } // 欲查詢的景點代號

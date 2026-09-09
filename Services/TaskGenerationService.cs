@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using backend.dao;
 using backend.Models;
 using backend.Services;
+using Microsoft.Extensions.Logging;
 
 namespace backend.Services
 {
@@ -12,6 +13,7 @@ namespace backend.Services
     {
         private readonly TaskDao _taskDao;
         private readonly IAiTaskClient _aiTaskClient;
+        private readonly ILogger<TaskGenerationService> _logger;
 
         // =====================================================================
         // 各題型的 task_prompt 範本
@@ -122,27 +124,132 @@ namespace backend.Services
         // 不需 AI 生成的題型（GPS 定位型 / 商家後台維護）
         private static readonly HashSet<int> _skipAiTypeIds = new() { 1, 9, 10 };
 
-        public TaskGenerationService(TaskDao taskDao, IAiTaskClient aiTaskClient)
+        public TaskGenerationService(
+            TaskDao taskDao,
+            IAiTaskClient aiTaskClient,
+            ILogger<TaskGenerationService> logger)
         {
             _taskDao = taskDao;
             _aiTaskClient = aiTaskClient;
+            _logger = logger;
         }
 
-        public async Task<List<TaskDetailResponse>> GenerateTasksForNodeAsync(TaskListReq req, string placeId, string storyId)
+        // =====================================================================
+        // 對外入口
+        // 三個入口一律不對外丟例外，只回傳實際成功生成的任務筆數。
+        // 呼叫端（劇本生成）不需要 try/catch，任務生成失敗不影響劇本生成的結果。
+        // =====================================================================
+
+        /// <summary>
+        /// 劇本生成完畢後呼叫，為多份劇本的所有節點產生任務。
+        /// </summary>
+        public async Task<int> GenerateTasksForStoriesAsync(IEnumerable<string> storyIds, int playerCount)
+        {
+            if (storyIds == null) return 0;
+
+            int total = 0;
+            foreach (var storyId in storyIds)
+                total += await GenerateTasksForStoryAsync(storyId, playerCount);
+
+            return total;
+        }
+
+        /// <summary>
+        /// 為單一劇本底下的所有節點產生任務。單一節點失敗會跳過並繼續處理下一個節點。
+        /// </summary>
+        public async Task<int> GenerateTasksForStoryAsync(string storyId, int playerCount)
+        {
+            if (string.IsNullOrWhiteSpace(storyId)) return 0;
+
+            List<TaskDao.StoryNodeRef> nodes;
+            try
+            {
+                nodes = _taskDao.GetNodesByStoryId(storyId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "劇本 {StoryId} 查詢節點失敗，略過任務生成。", storyId);
+                return 0;
+            }
+
+            int total = 0;
+            foreach (var node in nodes)
+                total += await GenerateForNodeSafeAsync(node, playerCount);
+
+            _logger.LogInformation("劇本 {StoryId} 任務生成完成，共 {Count} 筆。", storyId, total);
+            return total;
+        }
+
+        /// <summary>
+        /// 為單一節點產生任務，place_id 與 story_id 由 node_id 反查。
+        /// </summary>
+        public async Task<int> GenerateTasksForNodeAsync(string nodeId, int playerCount)
+        {
+            if (string.IsNullOrWhiteSpace(nodeId)) return 0;
+
+            TaskDao.StoryNodeRef node;
+            try
+            {
+                node = _taskDao.GetNodeRef(nodeId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "節點 {NodeId} 查詢失敗，略過任務生成。", nodeId);
+                return 0;
+            }
+
+            if (node == null)
+            {
+                _logger.LogWarning("找不到節點 {NodeId}，略過任務生成。", nodeId);
+                return 0;
+            }
+
+            return await GenerateForNodeSafeAsync(node, playerCount);
+        }
+
+        /// <summary>
+        /// 單一節點生成的容錯包裝：缺 place_id 或生成過程出錯都只寫 log，不中斷整體流程。
+        /// </summary>
+        private async Task<int> GenerateForNodeSafeAsync(TaskDao.StoryNodeRef node, int playerCount)
+        {
+            if (string.IsNullOrWhiteSpace(node.place_id))
+            {
+                _logger.LogWarning("節點 {NodeId} 的 place_id 為空，略過任務生成。", node.node_id);
+                return 0;
+            }
+
+            try
+            {
+                var tasks = await GenerateForNodeCoreAsync(node.node_id, node.place_id, node.story_id, playerCount);
+                return tasks?.Count ?? 0;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "節點 {NodeId} 任務生成失敗，略過此節點。", node.node_id);
+                return 0;
+            }
+        }
+
+        // =====================================================================
+        // 生成核心邏輯
+        // =====================================================================
+
+        private async Task<List<TaskDetailResponse>> GenerateForNodeCoreAsync(
+            string nodeId, string placeId, string storyId, int playerCount)
         {
             var placeTypes = _taskDao.GetPlaceTypes(placeId);
             if (placeTypes == null || placeTypes.Count == 0)
                 throw new InvalidOperationException($"景點 {placeId} 在 md_place_type 找不到任何任務類型設定。");
 
             string placeCategory = placeTypes.FirstOrDefault()?.place_category;
-            bool isLastNode = _taskDao.IsLastNodeInStory(storyId, req.node_id);
+            bool isLastNode = _taskDao.IsLastNodeInStory(storyId, nodeId);
 
             // 決定此節點要生成哪幾種題型
             List<int> tasksToGenerate = new List<int> { 3 }; // 創意攝影型為基本題型
 
             if (isLastNode) tasksToGenerate.Add(2);              // 跨關集結型：最後節點
             if (placeCategory == "2") tasksToGenerate.Add(4);   // 地方美食型：餐飲類景點
-            if (req.player_count >= 2) tasksToGenerate.Add(5);  // 協作解謎型：多人同行
+            if (playerCount >= 2) tasksToGenerate.Add(5);       // 協作解謎型：多人同行
 
             // 從景點支援的隨機題型中抽一個（6~10 類）
             var availableRandomTypes = placeTypes.Where(t => t.type_id >= 6 && t.type_id <= 10).ToList();
@@ -153,7 +260,7 @@ namespace backend.Services
             }
 
             // 取得劇本內容（供 AI 生成）
-            string storyContent = _taskDao.GetStoryContent(req.node_id);
+            string storyContent = _taskDao.GetStoryContent(nodeId);
 
             var results = new List<TaskDetailResponse>();
 
@@ -166,7 +273,7 @@ namespace backend.Services
                 if (_skipAiTypeIds.Contains(typeId))
                 {
                     // 不需要 AI 生成的題型，直接建立預設任務
-                    generatedTask = BuildSkipTask(req.node_id, placeId, storyId, typeId, typeName);
+                    generatedTask = BuildSkipTask(nodeId, placeId, storyId, typeId, typeName);
                 }
                 else
                 {
@@ -175,8 +282,8 @@ namespace backend.Services
 
                     // 依題型選擇呼叫哪支 API
                     generatedTask = _choiceTypeIds.Contains(typeId)
-                        ? await CallChoiceApiAsync(aiRequest, req.node_id, placeId, storyId, typeName)
-                        : await CallDescriptionApiAsync(aiRequest, req.node_id, placeId, storyId, typeName);
+                        ? await CallChoiceApiAsync(aiRequest, nodeId, placeId, storyId, typeName)
+                        : await CallDescriptionApiAsync(aiRequest, nodeId, placeId, storyId, typeName);
                 }
 
                 // 寫入資料庫
@@ -241,7 +348,7 @@ namespace backend.Services
             {
                 // 生成失敗時用 fallback 文字，不中斷流程
                 task.task_describe = $"[AI 生成失敗] ({typeName}) 請直接前往景點探索並依現場情況完成任務。";
-                Console.WriteLine($"[TaskGenerationService] generate/description 失敗: {ex.Message}");
+                _logger.LogError(ex, "generate/description 失敗（題型 {TypeName}），改用 fallback 文字。", typeName);
             }
 
             return task;
@@ -286,7 +393,7 @@ namespace backend.Services
             catch (Exception ex)
             {
                 task.task_describe = $"[AI 生成失敗] ({typeName}) 請問關於此景點，下列何者正確？";
-                Console.WriteLine($"[TaskGenerationService] generate/choice 失敗: {ex.Message}");
+                _logger.LogError(ex, "generate/choice 失敗（題型 {TypeName}），改用 fallback 文字。", typeName);
             }
 
             return task;

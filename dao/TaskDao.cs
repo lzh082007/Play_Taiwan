@@ -581,6 +581,55 @@ namespace backend.dao
         #region 任務查詢與寫入
 
         /// <summary>
+        /// 任務生成階段所需的節點基本資料（不含座標，故不打 Neo4j）。
+        /// </summary>
+        public class StoryNodeRef
+        {
+            public string node_id  { get; set; }
+            public string place_id { get; set; }
+            public string story_id { get; set; }
+        }
+
+        /// <summary>
+        /// 取得一份劇本底下所有啟用中的節點，供劇本生成後批次產生任務使用。
+        /// </summary>
+        public List<StoryNodeRef> GetNodesByStoryId(string story_id)
+        {
+            Hashtable param = new()
+            {
+                {"@story_id", new MySQLParameter(story_id, MySqlDbType.VarChar)}
+            };
+
+            string sql = @"
+                SELECT node_id, place_id, story_id
+                FROM md_story_node
+                WHERE story_id = @story_id AND is_active = 1
+                ORDER BY node_order";
+
+            return mysql_connect.GetDataList<StoryNodeRef>(sql, param) ?? new List<StoryNodeRef>();
+        }
+
+        /// <summary>
+        /// 由 node_id 反查其 place_id 與 story_id，供單一節點生成任務使用。
+        /// </summary>
+        public StoryNodeRef GetNodeRef(string node_id)
+        {
+            Hashtable param = new()
+            {
+                {"@node_id", new MySQLParameter(node_id, MySqlDbType.VarChar)}
+            };
+
+            string sql = @"
+                SELECT node_id, place_id, story_id
+                FROM md_story_node
+                WHERE node_id = @node_id
+                LIMIT 1";
+
+            var rows = mysql_connect.GetDataList<StoryNodeRef>(sql, param);
+            return rows is { Count: > 0 } ? rows[0] : null;
+        }
+
+        /// <summary>
         /// 查詢特定節點下的所有任務，若已完成則不再顯示。
         /// </summary>
         public List<TaskDetailResponse> GetTasksByNodeId(string node_id)

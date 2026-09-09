@@ -21,11 +21,16 @@ namespace backend.Controllers
     {
         private readonly ILogger<TaskController> _logger;
         private readonly TaskService _service;
+        private readonly TaskGenerationService _taskGeneration;
 
-        public TaskController(ILogger<TaskController> logger, TaskService service)
+        public TaskController(
+            ILogger<TaskController> logger,
+            TaskService service,
+            TaskGenerationService taskGeneration)
         {
             _logger = logger;
             _service = service;
+            _taskGeneration = taskGeneration;
         }
 
         #region 取得任務
@@ -49,6 +54,31 @@ namespace backend.Controllers
             {
                 return NotFound(new ResultViewModel<List<TaskDetailResponse>> { isSuccess = false, message = e.Message.ToString(), Result = null });
             }
+        }
+
+        #endregion
+
+        #region 手動生成任務（測試用）
+
+        [HttpPost]
+        [Route("Generate")]
+        // POST: api/Task/Generate
+        // 測試用：不經過劇本生成流程，直接對指定 story_id 或 node_id 產生任務並寫入 md_task。
+        // 正式流程是在 POST api/Story/GenerateAi 劇本存檔後自動觸發。
+        public async Task<IActionResult> GenerateTasks([FromBody] TaskGenerateReq req)
+        {
+            int playerCount = req.player_count > 0 ? req.player_count : 2;
+
+            int count = !string.IsNullOrWhiteSpace(req.node_id)
+                ? await _taskGeneration.GenerateTasksForNodeAsync(req.node_id, playerCount)
+                : await _taskGeneration.GenerateTasksForStoryAsync(req.story_id, playerCount);
+
+            return Ok(new ResultViewModel<object>
+            {
+                isSuccess = true,
+                message = $"共生成 {count} 筆任務",
+                Result = new { generated = count }
+            });
         }
 
         #endregion

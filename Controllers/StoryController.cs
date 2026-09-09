@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Net.Http;
 using System.Text.Json;
@@ -23,15 +24,18 @@ namespace backend.Controllers
         private readonly ILogger<StoryController> _logger;
         private readonly StoryService _service;
         private readonly IHttpClientFactory _httpClientFactory;
+        private readonly TaskGenerationService _taskGeneration;
 
         public StoryController(
             ILogger<StoryController> logger,
             StoryService service,
-            IHttpClientFactory httpClientFactory)
+            IHttpClientFactory httpClientFactory,
+            TaskGenerationService taskGeneration)
         {
             _logger = logger;
             _service = service;
             _httpClientFactory = httpClientFactory;
+            _taskGeneration = taskGeneration;
         }
 
         #region 文字轉劇本 (spin)
@@ -347,6 +351,10 @@ namespace backend.Controllers
                         allSavedStories.AddRange(savedStories);
                     }
                 }
+
+                // 劇本存檔後，接著為所有節點生成任務並寫入 md_task。
+                // 此方法內部已容錯，不會丟例外，任務生成失敗不影響劇本生成結果。
+                await _taskGeneration.GenerateTasksForStoriesAsync(allSavedStories.Select(s => s["story_id"]), pSize);
 
                 return Ok(new ResultViewModel<object>
                 {

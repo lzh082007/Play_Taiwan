@@ -11,17 +11,16 @@ namespace backend.Services
     /// </summary>
     public class TaskService(
         TaskDao task_dao_obj,
-        ITaskVerificationService verification,
-        TaskGenerationService taskGeneration)
+        ITaskVerificationService verification)
     {
         private readonly TaskDao task_dao = task_dao_obj;
         private readonly ITaskVerificationService _verification = verification;
-        private readonly TaskGenerationService _taskGeneration = taskGeneration;
 
         #region 取得任務詳情
         /// <summary>
-        /// 驗證玩家位置後，查詢或生成該節點的所有任務清單。
-        /// 流程：位置驗證 → 查節點對應的 place_id → 查是否有現成任務 → 無則生成並存入 DB → 回傳
+        /// 驗證玩家位置後，從資料庫取出該節點的所有任務清單。
+        /// 流程：位置驗證 → 讀取 md_task → 回傳
+        /// 任務本身是在劇本生成時（POST api/Story/GenerateAi）就已產生並寫入資料庫，此處只負責讀取。
         /// </summary>
         public async Task<List<TaskDetailResponse>> GetTask(TaskListReq req)
         {
@@ -31,21 +30,10 @@ namespace backend.Services
                 throw new ArgumentException("玩家位置不在任務地點附近，無法取得任務詳情。");
             }
 
-            //從 md_story_node 查此節點對應的 place_id
-            var placeLocation = task_dao.GetPlaceLocation(req.node_id).Result;
-            if (placeLocation == null)
-                throw new InvalidOperationException($"找不到節點 {req.node_id} 對應的景點資料。");
-
-            string placeId = placeLocation.PlaceId;
-            string storyId = placeLocation.StoryId;
-            if (string.IsNullOrWhiteSpace(placeId))
-                throw new InvalidOperationException($"節點 {req.node_id} 查無景點代號 (place_id)");
-
-            // 呼叫 TaskGenerationService 來判斷與產生 md_task
-            var tasks = await _taskGeneration.GenerateTasksForNodeAsync(req, placeId, storyId);
+            var tasks = task_dao.GetTasksByNodeId(req.node_id);
 
             if (tasks == null || tasks.Count == 0)
-                throw new InvalidOperationException($"節點 {req.node_id} 無法生成任務，請確認 md_place_type 設定。");
+                throw new InvalidOperationException($"節點 {req.node_id} 尚未生成任務，請先完成劇本生成。");
 
             return tasks;
         }
