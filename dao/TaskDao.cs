@@ -57,7 +57,7 @@ namespace backend.dao
             string cypher = @"
                             MATCH (n)
                             WHERE (n:Attraction OR n:Event OR n:Hotel OR n:Restaurant)
-                            AND (elementId(n) = $id OR n.id = $id OR n.EventID = $id)
+                            AND (elementId(n) = $id OR n.id = $id OR n.EventID = $id OR n.uid = $id)
                             RETURN coalesce(n.lat, n.PositionLat) AS Lat,
                                 coalesce(n.lon, n.PositionLon) AS Lon
                             LIMIT 1";
@@ -79,6 +79,70 @@ namespace backend.dao
             // 若查無結果，回傳預設假座標供測試
             return new Location { PlaceId = targetPlaceId, StoryId = targetStoryId, Lat = 25.0456, Lon = 121.5123 };
         }
+        #endregion
+
+        #region 景點圖片查詢（供「景點猜猜樂」題型組選項用）
+
+        private class ImageUrlRow
+        {
+            public string url { get; set; }
+        }
+
+        /// <summary>
+        /// 依 place_id（可能是 Neo4j elementId 或新版 uid）取出該景點的所有圖片網址。
+        /// </summary>
+        public async Task<List<string>> GetPlaceImagesAsync(string placeId)
+        {
+            string cypher = @"
+                MATCH (n)
+                WHERE (n:Attraction OR n:Event OR n:Hotel OR n:Restaurant)
+                  AND (elementId(n) = $id OR n.id = $id OR n.EventID = $id OR n.uid = $id)
+                MATCH (n)-[:HAS_IMAGE]->(img:Image)
+                RETURN img.url AS url";
+
+            var rows = await neo4j_service.ExecuteCypherAsync<List<ImageUrlRow>>(cypher, new { id = placeId });
+
+            return rows?.Select(r => r.url)
+                        .Where(u => !string.IsNullOrWhiteSpace(u))
+                        .ToList()
+                   ?? new List<string>();
+        }
+
+        /// <summary>
+        /// 隨機取出其他景點（排除 excludePlaceId）的圖片網址，供錯誤選項使用。
+        /// </summary>
+        public async Task<List<string>> GetRandomDecoyImagesAsync(string excludePlaceId, int count)
+        {
+            if (count <= 0) return new List<string>();
+
+            // 注意：合併後的 Neo4j 節點大多只有 uid、沒有 id 屬性，
+            // 若直接寫成 NOT (elementId(p) = $id OR p.id = $id OR ...) 排除，
+            // 只要其中一個屬性在該節點不存在（值為 NULL），Cypher 三值邏輯會讓整條
+            // WHERE 判定變成 NULL 而被當作 false 濾掉，導致幾乎所有列都被排除。
+            // 因此先用同一套 OR 條件（在「包含」語意下 NULL 傳染無害）解析出目標節點
+            // 真正的 elementId，再用單一不可能為 NULL 的 elementId(p) <> excludeId 排除。
+            string cypher = @"
+                MATCH (n)
+                WHERE (n:Attraction OR n:Event OR n:Hotel OR n:Restaurant)
+                  AND (elementId(n) = $id OR n.id = $id OR n.EventID = $id OR n.uid = $id)
+                WITH elementId(n) AS excludeId
+                LIMIT 1
+                MATCH (p)-[:HAS_IMAGE]->(img:Image)
+                WHERE (p:Attraction OR p:Event OR p:Hotel OR p:Restaurant)
+                  AND elementId(p) <> excludeId
+                RETURN img.url AS url
+                ORDER BY rand()
+                LIMIT $limit";
+
+            var rows = await neo4j_service.ExecuteCypherAsync<List<ImageUrlRow>>(
+                cypher, new { id = excludePlaceId, limit = count });
+
+            return rows?.Select(r => r.url)
+                        .Where(u => !string.IsNullOrWhiteSpace(u))
+                        .ToList()
+                   ?? new List<string>();
+        }
+
         #endregion
 
 
@@ -642,7 +706,8 @@ namespace backend.dao
             string sql = @"
                 SELECT
                     t.task_id, t.story_id, t.node_id, t.task_place_id,
-                    t.task_type AS type_id, ty.type_name AS task_type, t.task_describe
+                    t.task_type AS type_id, ty.type_name AS task_type, t.task_describe,
+                    t.task_describe_b, t.correct_answer
                 FROM md_task t
                 INNER JOIN md_type ty ON ty.type_id = t.task_type
                 WHERE t.node_id = @node_id";
@@ -668,7 +733,8 @@ namespace backend.dao
             string sql = @"
                 SELECT
                     t.task_id, t.story_id, t.node_id, t.task_place_id,
-                    t.task_type AS type_id, ty.type_name AS task_type, t.task_describe
+                    t.task_type AS type_id, ty.type_name AS task_type, t.task_describe,
+                    t.task_describe_b, t.correct_answer
                 FROM md_task t
                 INNER JOIN md_type ty ON ty.type_id = t.task_type
                 WHERE t.task_id = @task_id
@@ -692,7 +758,7 @@ namespace backend.dao
             };
 
             string sql = @"
-                SELECT option_id AS option_key, option_context AS option_text, option_url, is_correct
+                SELECT option_key, option_context AS option_text, option_url, is_correct
                 FROM md_option
                 WHERE task_id = @task_id
                 ORDER BY option_id";
@@ -731,14 +797,17 @@ namespace backend.dao
                 {"@node_id",      new MySQLParameter(task.node_id,     MySqlDbType.VarChar)},
                 {"@task_type",    new MySQLParameter(typeId,           MySqlDbType.Int32)},
                 {"@task_describe",new MySQLParameter(task.task_describe ?? "", MySqlDbType.Text)},
-                {"@task_place_id",new MySQLParameter(task.task_place_id, MySqlDbType.VarChar)}
+                {"@task_place_id",new MySQLParameter(task.task_place_id, MySqlDbType.VarChar)},
+                // 協作解謎型（type_id=5）專用，其他題型一律為 NULL
+                {"@task_describe_b", new MySQLParameter(string.IsNullOrEmpty(task.task_describe_b) ? (object)DBNull.Value : task.task_describe_b, MySqlDbType.Text)},
+                {"@correct_answer",  new MySQLParameter(string.IsNullOrEmpty(task.correct_answer)  ? (object)DBNull.Value : task.correct_answer,  MySqlDbType.VarChar)}
             };
 
             string sql = @"
                 INSERT INTO md_task
-                (story_id, node_id, task_type, task_describe, task_place_id)
+                (story_id, node_id, task_type, task_describe, task_place_id, task_describe_b, correct_answer)
                 VALUES
-                (@story_id, @node_id, @task_type, @task_describe, @task_place_id);
+                (@story_id, @node_id, @task_type, @task_describe, @task_place_id, @task_describe_b, @correct_answer);
                 SELECT LAST_INSERT_ID() AS last_id;";
 
             var idRows = mysql_connect.GetDataList<LastIdRow>(sql, param);
@@ -756,14 +825,15 @@ namespace backend.dao
                 Hashtable param = new()
                 {
                     {"@task_id",        new MySQLParameter(task_id,          MySqlDbType.Int32)},
+                    {"@option_key",     new MySQLParameter(opt.option_key ?? (object)DBNull.Value, MySqlDbType.VarChar)},
                     {"@option_context", new MySQLParameter(opt.option_text ?? "", MySqlDbType.VarChar)},
                     {"@option_url", new MySQLParameter(opt.option_url ?? (object)DBNull.Value, MySqlDbType.VarChar)},
                     {"@is_correct",     new MySQLParameter(opt.is_correct ? 1 : 0, MySqlDbType.Int32)}
                 };
 
                 string sql = @"
-                    INSERT INTO md_option (task_id, option_context, option_url, is_correct)
-                    VALUES (@task_id, @option_context, @option_url, @is_correct)";
+                    INSERT INTO md_option (task_id, option_key, option_context, option_url, is_correct)
+                    VALUES (@task_id, @option_key, @option_context, @option_url, @is_correct)";
 
                 mysql_connect.Execute(sql, param);
             }

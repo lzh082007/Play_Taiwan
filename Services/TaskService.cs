@@ -35,6 +35,17 @@ namespace backend.Services
             if (tasks == null || tasks.Count == 0)
                 throw new InvalidOperationException($"節點 {req.node_id} 尚未生成任務，請先完成劇本生成。");
 
+            // 協作解謎型（type_id=5）：玩家 B（player_index=2）要看到的是 task_describe_b，
+            // 對玩家 A 或其他題型則不動，維持 task_describe 原樣。
+            if (req.player_index == 2)
+            {
+                foreach (var task in tasks)
+                {
+                    if (task.type_id == 5 && !string.IsNullOrEmpty(task.task_describe_b))
+                        task.task_describe = task.task_describe_b;
+                }
+            }
+
             return tasks;
         }
         #endregion
@@ -43,9 +54,9 @@ namespace backend.Services
         #region 送出答案
 
         /// <summary>
-        /// 依任務類型驗證答案，並將答錯次數或完成狀態寫入 ep_task_record。
+        /// 驗證玩家位置後，依任務類型驗證答案，並將答錯次數或完成狀態寫入 ep_task_record。
         /// </summary>
-        public TaskAnswerResponse SubmitAnswer(TaskAnswerRequest req)
+        public async Task<TaskAnswerResponse> SubmitAnswer(TaskAnswerRequest req)
         {
             if (string.IsNullOrWhiteSpace(req.ep_id))
             {
@@ -53,6 +64,12 @@ namespace backend.Services
             }
 
             var task = task_dao.GetTaskDetail(req.task_id);
+
+            //位置驗證：提交答案時玩家也必須在任務地點附近
+            if (await ValidatePlaceProximity(task.node_id, req.gps_lat, req.gps_lon) == false)
+            {
+                throw new ArgumentException("玩家位置不在任務地點附近，無法提交答案。");
+            }
 
             TaskAnswerResponse result = _verification.Verify(task, req);
 
@@ -138,8 +155,17 @@ namespace backend.Services
 
         private async Task<bool> PlaceValidation(TaskListReq req)
         {
+            return await ValidatePlaceProximity(req.node_id, req.gps_lat, req.gps_lon);
+        }
+
+        /// <summary>
+        /// 驗證玩家目前位置是否在指定節點對應景點的 500 公尺內。
+        /// 取得任務內容（GetTask）與提交答案（SubmitAnswer）共用同一套位置驗證。
+        /// </summary>
+        private async Task<bool> ValidatePlaceProximity(string node_id, double gps_lat, double gps_lon)
+        {
             // 1. 取得目標地點的經緯度
-            var place_loc = await task_dao.GetPlaceLocation(req.node_id);
+            var place_loc = await task_dao.GetPlaceLocation(node_id);
 
             // 2. 防呆：如果找不到該節點，或是該節點缺少經緯度，則驗證失敗
             if (place_loc == null || !place_loc.Lat.HasValue || !place_loc.Lon.HasValue)
@@ -149,8 +175,8 @@ namespace backend.Services
 
             // 3. 計算玩家目前位置與目標地點的距離 (單位: 公尺)
             double distance = CalculateDistance(
-                req.gps_lat,
-                req.gps_lon,
+                gps_lat,
+                gps_lon,
                 place_loc.Lat.Value,
                 place_loc.Lon.Value
             );

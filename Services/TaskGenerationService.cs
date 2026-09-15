@@ -62,20 +62,6 @@ namespace backend.Services
 - 語氣輕鬆，帶有食物香氣感，讓人想去品嚐
 - 繁體中文，字數 50–80 字",
 
-            [5] = @"你是一個台灣文化探索遊戲的任務設計師。
-
-景點資訊：
-{story_content}
-
-請根據以上景點資訊，設計一道「協作解謎型」的任務描述。此題型設計為 2 人以上隊伍共同完成。
-
-要求：
-- 設計一個需要「分工合作」才能解開的情境，例如：一人觀察A處，另一人觀察B處，合力拼出答案
-- 謎題應與景點的歷史、建築或文化特色相關（如：碑文、年份、對聯文字等）
-- 語氣充滿挑戰感與趣味性，強調「一個人做不到，但兩個人就能解開」
-- 需說明玩家最終要輸入什麼格式的答案（如：四位數字、一個人名）
-- 繁體中文，字數 60–100 字",
-
             [6] = @"你是一個台灣文化探索遊戲的任務設計師。
 
 景點資訊：
@@ -118,11 +104,37 @@ namespace backend.Services
 - 繁體中文，字數 60–100 字",
         };
 
-        // 需要呼叫 generate/choice 的題型代碼（有文字選項）
+        // 協作解謎型（type_id=5）專用 prompt 範本：一次生成兩位玩家各自的線索與共同的最終答案，
+        // 跟其他題型的 task_prompt 分開維護，因為呼叫的是專屬的 generate/coop API，回傳結構也不同。
+        private const string CoopPromptTemplate = @"你是一個台灣文化探索遊戲的任務設計師。
+
+景點資訊：
+{story_content}
+
+請根據以上景點資訊，設計一道「協作解謎型」的任務。此題型由兩位玩家在各自手機上看到不同線索，
+需要口頭交流、互相補足資訊，才能合力推出同一組正確答案。
+
+要求：
+- 分別設計「玩家 A 線索」與「玩家 B 線索」兩段文字，各自只包含部分資訊，缺一不可
+- 謎題應與景點的歷史、建築或文化特色相關（如：碑文、年份、對聯文字等）
+- 語氣充滿挑戰感與趣味性，強調「一個人做不到，但兩個人就能解開」
+- 明確定義一個簡短、格式固定的正確答案（如：四位數字、一個地名），答案本身不可出現在任一段線索文字中
+- 繁體中文，兩段線索各 40–80 字";
+
+        // 需要呼叫 generate/choice 的題型代碼（有文字選項，選項由 AI 生成）
         private static readonly HashSet<int> _choiceTypeIds = new() { 6 };
 
-        // 不需 AI 生成的題型（GPS 定位型 / 商家後台維護）
-        private static readonly HashSet<int> _skipAiTypeIds = new() { 1, 9, 10 };
+        // 不需 AI 生成的題型（商家後台維護）
+        private static readonly HashSet<int> _skipAiTypeIds = new() { 9, 10 };
+
+        // 選項為圖片、不經 AI 篩選的題型（景點猜猜樂：題幹仍由 AI 生成，但選項圖片直接從 Neo4j 抓）
+        private static readonly HashSet<int> _imageOptionTypeIds = new() { 7 };
+
+        // 需要呼叫 generate/coop 的題型代碼（雙人分別線索 + 共同答案）
+        private static readonly HashSet<int> _coopTypeIds = new() { 5 };
+
+        // 景點猜猜樂：圖片選項總數（1 張正確 + N 張錯誤）
+        private const int ImageOptionCount = 4;
 
         public TaskGenerationService(
             TaskDao taskDao,
@@ -136,30 +148,31 @@ namespace backend.Services
 
         // =====================================================================
         // 對外入口
-        // 三個入口一律不對外丟例外，只回傳實際成功生成的任務筆數。
+        // 三個入口一律不對外丟例外，回傳實際成功生成的任務清單（可能為空）。
         // 呼叫端（劇本生成）不需要 try/catch，任務生成失敗不影響劇本生成的結果。
         // =====================================================================
 
         /// <summary>
         /// 劇本生成完畢後呼叫，為多份劇本的所有節點產生任務。
         /// </summary>
-        public async Task<int> GenerateTasksForStoriesAsync(IEnumerable<string> storyIds, int playerCount)
+        public async Task<List<TaskDetailResponse>> GenerateTasksForStoriesAsync(IEnumerable<string> storyIds, int playerCount)
         {
-            if (storyIds == null) return 0;
+            var results = new List<TaskDetailResponse>();
+            if (storyIds == null) return results;
 
-            int total = 0;
             foreach (var storyId in storyIds)
-                total += await GenerateTasksForStoryAsync(storyId, playerCount);
+                results.AddRange(await GenerateTasksForStoryAsync(storyId, playerCount));
 
-            return total;
+            return results;
         }
 
         /// <summary>
         /// 為單一劇本底下的所有節點產生任務。單一節點失敗會跳過並繼續處理下一個節點。
         /// </summary>
-        public async Task<int> GenerateTasksForStoryAsync(string storyId, int playerCount)
+        public async Task<List<TaskDetailResponse>> GenerateTasksForStoryAsync(string storyId, int playerCount)
         {
-            if (string.IsNullOrWhiteSpace(storyId)) return 0;
+            var results = new List<TaskDetailResponse>();
+            if (string.IsNullOrWhiteSpace(storyId)) return results;
 
             List<TaskDao.StoryNodeRef> nodes;
             try
@@ -169,23 +182,23 @@ namespace backend.Services
             catch (Exception ex)
             {
                 _logger.LogError(ex, "劇本 {StoryId} 查詢節點失敗，略過任務生成。", storyId);
-                return 0;
+                return results;
             }
 
-            int total = 0;
             foreach (var node in nodes)
-                total += await GenerateForNodeSafeAsync(node, playerCount);
+                results.AddRange(await GenerateForNodeSafeAsync(node, playerCount));
 
-            _logger.LogInformation("劇本 {StoryId} 任務生成完成，共 {Count} 筆。", storyId, total);
-            return total;
+            _logger.LogInformation("劇本 {StoryId} 任務生成完成，共 {Count} 筆。", storyId, results.Count);
+            return results;
         }
 
         /// <summary>
         /// 為單一節點產生任務，place_id 與 story_id 由 node_id 反查。
         /// </summary>
-        public async Task<int> GenerateTasksForNodeAsync(string nodeId, int playerCount)
+        public async Task<List<TaskDetailResponse>> GenerateTasksForNodeAsync(string nodeId, int playerCount)
         {
-            if (string.IsNullOrWhiteSpace(nodeId)) return 0;
+            var results = new List<TaskDetailResponse>();
+            if (string.IsNullOrWhiteSpace(nodeId)) return results;
 
             TaskDao.StoryNodeRef node;
             try
@@ -195,13 +208,13 @@ namespace backend.Services
             catch (Exception ex)
             {
                 _logger.LogError(ex, "節點 {NodeId} 查詢失敗，略過任務生成。", nodeId);
-                return 0;
+                return results;
             }
 
             if (node == null)
             {
                 _logger.LogWarning("找不到節點 {NodeId}，略過任務生成。", nodeId);
-                return 0;
+                return results;
             }
 
             return await GenerateForNodeSafeAsync(node, playerCount);
@@ -210,23 +223,23 @@ namespace backend.Services
         /// <summary>
         /// 單一節點生成的容錯包裝：缺 place_id 或生成過程出錯都只寫 log，不中斷整體流程。
         /// </summary>
-        private async Task<int> GenerateForNodeSafeAsync(TaskDao.StoryNodeRef node, int playerCount)
+        private async Task<List<TaskDetailResponse>> GenerateForNodeSafeAsync(TaskDao.StoryNodeRef node, int playerCount)
         {
             if (string.IsNullOrWhiteSpace(node.place_id))
             {
                 _logger.LogWarning("節點 {NodeId} 的 place_id 為空，略過任務生成。", node.node_id);
-                return 0;
+                return new List<TaskDetailResponse>();
             }
 
             try
             {
                 var tasks = await GenerateForNodeCoreAsync(node.node_id, node.place_id, node.story_id, playerCount);
-                return tasks?.Count ?? 0;
+                return tasks ?? new List<TaskDetailResponse>();
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "節點 {NodeId} 任務生成失敗，略過此節點。", node.node_id);
-                return 0;
+                return new List<TaskDetailResponse>();
             }
         }
 
@@ -275,6 +288,12 @@ namespace backend.Services
                     // 不需要 AI 生成的題型，直接建立預設任務
                     generatedTask = BuildSkipTask(nodeId, placeId, storyId, typeId, typeName);
                 }
+                else if (_coopTypeIds.Contains(typeId))
+                {
+                    // 協作解謎型：獨立的請求/回應結構（兩位玩家各自線索 + 共同答案），走專屬 API
+                    var coopRequest = BuildAiRequest(typeId, typeName, placeId, storyContent);
+                    generatedTask = await CallCoopApiAsync(coopRequest, nodeId, placeId, storyId, typeId, typeName);
+                }
                 else
                 {
                     // 組裝 AI 請求參數
@@ -282,9 +301,13 @@ namespace backend.Services
 
                     // 依題型選擇呼叫哪支 API
                     generatedTask = _choiceTypeIds.Contains(typeId)
-                        ? await CallChoiceApiAsync(aiRequest, nodeId, placeId, storyId, typeName)
-                        : await CallDescriptionApiAsync(aiRequest, nodeId, placeId, storyId, typeName);
+                        ? await CallChoiceApiAsync(aiRequest, nodeId, placeId, storyId, typeId, typeName)
+                        : await CallDescriptionApiAsync(aiRequest, nodeId, placeId, storyId, typeId, typeName);
                 }
+
+                // 景點猜猜樂：選項不經 AI，直接從 Neo4j 抓景點圖片組成選項
+                if (_imageOptionTypeIds.Contains(typeId))
+                    await PopulateImageOptionsAsync(generatedTask, placeId);
 
                 // 寫入資料庫
                 int newTaskId = _taskDao.InsertTask(generatedTask, typeId);
@@ -308,9 +331,11 @@ namespace backend.Services
         /// </summary>
         private AiTaskRequest BuildAiRequest(int typeId, string typeName, string placeUid, string storyContent)
         {
-            string promptTemplate = _promptTemplates.TryGetValue(typeId, out var tmpl)
-                ? tmpl
-                : $"你是台灣文化探索遊戲的任務設計師，請根據以下景點資訊生成一道適合玩家的任務描述：\n\n{{story_content}}";
+            string promptTemplate = _coopTypeIds.Contains(typeId)
+                ? CoopPromptTemplate
+                : _promptTemplates.TryGetValue(typeId, out var tmpl)
+                    ? tmpl
+                    : $"你是台灣文化探索遊戲的任務設計師，請根據以下景點資訊生成一道適合玩家的任務描述：\n\n{{story_content}}";
 
             string taskPrompt = promptTemplate.Replace("{story_content}", storyContent);
 
@@ -332,9 +357,9 @@ namespace backend.Services
         /// 呼叫 generate/description API（無選項型）並轉換為 TaskDetailResponse。
         /// </summary>
         private async Task<TaskDetailResponse> CallDescriptionApiAsync(
-            AiTaskRequest aiRequest, string nodeId, string placeId, string storyId, string typeName)
+            AiTaskRequest aiRequest, string nodeId, string placeId, string storyId, int typeId, string typeName)
         {
-            var task = CreateBaseTask(nodeId, placeId, storyId, typeName);
+            var task = CreateBaseTask(nodeId, placeId, storyId, typeId, typeName);
 
             try
             {
@@ -358,9 +383,9 @@ namespace backend.Services
         /// 呼叫 generate/choice API（選擇題型）並轉換為 TaskDetailResponse（含選項）。
         /// </summary>
         private async Task<TaskDetailResponse> CallChoiceApiAsync(
-            AiTaskRequest aiRequest, string nodeId, string placeId, string storyId, string typeName)
+            AiTaskRequest aiRequest, string nodeId, string placeId, string storyId, int typeId, string typeName)
         {
-            var task = CreateBaseTask(nodeId, placeId, storyId, typeName);
+            var task = CreateBaseTask(nodeId, placeId, storyId, typeId, typeName);
 
             try
             {
@@ -399,17 +424,102 @@ namespace backend.Services
             return task;
         }
 
+        /// <summary>
+        /// 呼叫 generate/coop API（協作解謎型）並轉換為 TaskDetailResponse。
+        /// task_describe 存玩家 A 的線索、task_describe_b 存玩家 B 的線索，
+        /// TaskService.GetTask 會依 player_index 決定要把哪一段換到 task_describe 回傳給前端。
+        /// correct_answer 供 SubmitAnswer 核對玩家提交的 text_answer，不回傳給前端。
+        /// </summary>
+        private async Task<TaskDetailResponse> CallCoopApiAsync(
+            AiTaskRequest aiRequest, string nodeId, string placeId, string storyId, int typeId, string typeName)
+        {
+            var task = CreateBaseTask(nodeId, placeId, storyId, typeId, typeName);
+
+            const string fallbackA = "[AI 生成失敗] (協作解謎型) 請與隊友互相描述你所在位置看到的細節，合力找出答案。";
+            const string fallbackB = "[AI 生成失敗] (協作解謎型) 請與隊友互相描述你所在位置看到的細節，合力找出答案。";
+
+            try
+            {
+                var aiResponse = await _aiTaskClient.GenerateCoopAsync(aiRequest);
+
+                bool ok = aiResponse.success
+                    && !string.IsNullOrWhiteSpace(aiResponse.task_describe_a)
+                    && !string.IsNullOrWhiteSpace(aiResponse.task_describe_b)
+                    && !string.IsNullOrWhiteSpace(aiResponse.correct_answer);
+
+                task.task_describe   = ok ? aiResponse.task_describe_a : fallbackA;
+                task.task_describe_b = ok ? aiResponse.task_describe_b : fallbackB;
+                // 生成失敗時沒有可信的正確答案，correct_answer 留空；
+                // TaskVerificationService 會把「沒有 correct_answer」視為此題暫時無法核對答案。
+                task.correct_answer  = ok ? aiResponse.correct_answer.Trim() : null;
+            }
+            catch (Exception ex)
+            {
+                task.task_describe   = fallbackA;
+                task.task_describe_b = fallbackB;
+                task.correct_answer  = null;
+                _logger.LogError(ex, "generate/coop 失敗（題型 {TypeName}），改用 fallback 文字。", typeName);
+            }
+
+            return task;
+        }
+
+        // =====================================================================
+        // 景點猜猜樂：選項圖片（不經 AI，直接從 Neo4j 抓景點照片）
+        // =====================================================================
+
+        /// <summary>
+        /// 為「景點猜猜樂」題目組出圖片選項：1 張正確景點照片（依 place_id 從 Neo4j 隨機挑一張）
+        /// + N 張隨機錯誤景點照片，洗牌後依序標上 A/B/C/D。
+        /// 找不到圖片時只記 log、不丟例外，此題會沒有選項（前端沿用既有 fallback 顯示）。
+        /// </summary>
+        private async Task PopulateImageOptionsAsync(TaskDetailResponse task, string placeId)
+        {
+            try
+            {
+                var correctImages = await _taskDao.GetPlaceImagesAsync(placeId);
+                if (correctImages == null || correctImages.Count == 0)
+                {
+                    _logger.LogWarning("景點 {PlaceId} 在 Neo4j 找不到任何圖片，景點猜猜樂題目略過選項。", placeId);
+                    return;
+                }
+
+                string correctUrl = correctImages[Random.Shared.Next(correctImages.Count)];
+
+                var decoyUrls = await _taskDao.GetRandomDecoyImagesAsync(placeId, ImageOptionCount - 1);
+
+                var shuffledUrls = new List<string> { correctUrl };
+                shuffledUrls.AddRange(decoyUrls);
+                shuffledUrls = shuffledUrls.OrderBy(_ => Random.Shared.Next()).ToList();
+
+                string[] keys = { "A", "B", "C", "D" };
+                for (int i = 0; i < shuffledUrls.Count && i < keys.Length; i++)
+                {
+                    task.options.Add(new TaskOption
+                    {
+                        option_key  = keys[i],
+                        option_text = $"照片 {keys[i]}",
+                        option_url  = shuffledUrls[i],
+                        is_correct  = shuffledUrls[i] == correctUrl
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "景點 {PlaceId} 抓取景點猜猜樂圖片選項失敗，此題將沒有選項。", placeId);
+            }
+        }
+
         // =====================================================================
         // 不需 AI 生成的題型（直接返回預設文字）
         // =====================================================================
 
         private TaskDetailResponse BuildSkipTask(string nodeId, string placeId, string storyId, int typeId, string typeName)
         {
-            var task = CreateBaseTask(nodeId, placeId, storyId, typeName);
+            var task = CreateBaseTask(nodeId, placeId, storyId, typeId, typeName);
 
             task.task_describe = typeId switch
             {
-                1  => "請前往指定區域完成 GPS 定位打卡。",
                 9  => "(商家知識問答) 請依現場商家資訊作答。",
                 10 => "(圖像地理猜謎型) 請根據圖像選出正確位置。",
                 _  => $"({typeName}) 請依現場情況完成任務。"
@@ -422,13 +532,14 @@ namespace backend.Services
         // 共用基礎任務建立
         // =====================================================================
 
-        private TaskDetailResponse CreateBaseTask(string nodeId, string placeId, string storyId, string typeName)
+        private TaskDetailResponse CreateBaseTask(string nodeId, string placeId, string storyId, int typeId, string typeName)
         {
             return new TaskDetailResponse
             {
                 story_id     = storyId,
                 node_id      = nodeId,
                 task_place_id = placeId,
+                type_id      = typeId,
                 task_type    = typeName,
                 options      = new List<TaskOption>(),
                 media_urls   = new List<string>()

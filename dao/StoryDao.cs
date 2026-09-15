@@ -409,11 +409,11 @@ namespace backend.dao
                     string insertNodeSql = @"
                         INSERT INTO md_story_node (
                             node_id, story_id, node_order, node_title, fog_hint, is_active, day_index,
-                            location_codename, opening_text, success_text, npc_id
+                            location_codename, opening_text, success_text, npc_id, place_id
                         )
                         VALUES (
                             @node_id, @story_id, @node_order, @node_title, @fog_hint, 1, 1,
-                            @location_codename, @opening_text, @success_text, @npc_id
+                            @location_codename, @opening_text, @success_text, @npc_id, @place_id
                         );
                     ";
                     
@@ -461,7 +461,11 @@ namespace backend.dao
                             cmdNode.Parameters.AddWithValue("@success_text", success);
                             
                             // 🌟 將上面建立的 newNpcId 綁定到這個節點上
-                            cmdNode.Parameters.AddWithValue("@npc_id", newNpcId); 
+                            cmdNode.Parameters.AddWithValue("@npc_id", newNpcId);
+
+                            // AI 回傳的景點 uid（Neo4j spot_uuid），供任務生成時查詢 md_place_type / 圖片使用
+                            cmdNode.Parameters.AddWithValue("@place_id",
+                                string.IsNullOrWhiteSpace(node.SpotUuid) ? (object)DBNull.Value : node.SpotUuid);
 
                             cmdNode.ExecuteNonQuery();
                         }
