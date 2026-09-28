@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text.Json.Serialization;
 
 namespace backend.Models
 {
@@ -98,14 +99,21 @@ namespace backend.Models
         /// <summary>景點名稱</summary>
         public string location_name { get; set; }
 
-        /// <summary>緯度</summary>
+        /// <summary>緯度（依 place_id 向 Neo4j 查，查不到時為 0）</summary>
         public double lat { get; set; }
 
-        /// <summary>經度</summary>
+        /// <summary>經度（依 place_id 向 Neo4j 查，查不到時為 0）</summary>
         public double lng { get; set; }
 
-        /// <summary>是否已解鎖（已抵達過）</summary>
+        /// <summary>對應景點（story_node.place_id，Neo4j uid），後端查座標用，不回傳前端</summary>
+        [JsonIgnore]
+        public string place_id { get; set; }
+
+        /// <summary>是否已解鎖（第一站固定開放；抵達第 N 站後解鎖第 N+1 站，協作隊伍全隊共用進度）</summary>
         public bool is_unlocked { get; set; }
+
+        /// <summary>這一站的任務是否已全部通過</summary>
+        public bool is_completed { get; set; }
 
         /// <summary>是否為夜晚限定景點</summary>
         public bool is_night_only { get; set; }

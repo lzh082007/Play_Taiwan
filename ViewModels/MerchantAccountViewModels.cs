@@ -19,8 +19,11 @@ namespace backend.ViewModels
         /// <summary>選擇既有景點時的 Neo4j uid；與 new_place 二擇一。</summary>
         public string place_uid { get; set; }
 
-        /// <summary>選擇「建立新景點」時要寫入 Neo4j 的欄位；與 place_uid 二擇一。</summary>
-        public MerchantPlaceFields new_place { get; set; }
+        /// <summary>
+        /// 選擇「建立新景點」時的景點資料；與 place_uid 二擇一。
+        /// lat/lng 必填；category 可選 Attraction / Restaurant / Hotel / Event（預設 Restaurant）。
+        /// </summary>
+        public MerchantNewPlace new_place { get; set; }
     }
 
     public class MerchantRegisterResponse
@@ -31,8 +34,9 @@ namespace backend.ViewModels
     }
 
     /// <summary>
-    /// 更新商家資料請求。這些欄位同時會同步寫入 Neo4j 版本鏈（見 PlaceVersionChainService），
-    /// 讓 NFC 掃描回傳的商家資訊跟著更新。
+    /// 更新商家資料請求（PUT api/Merchant/Profile）。只更新有帶值的欄位，沒帶（null）的欄位維持原值。
+    /// 這些欄位同時會同步寫入 Neo4j 版本鏈（見 PlaceVersionChainService），
+    /// 讓 QR Code 掃描回傳的商家資訊跟著更新。
     /// </summary>
     public class MerchantUpdateRequest
     {

@@ -38,6 +38,7 @@ namespace backend.Controllers
         /// </summary>
         /// <remarks>
         /// 對應「地圖」頁面，顯示地點探索度、已收集節點與路線。
+        /// 只有劇本擁有者或協作隊員可以查看（403）；節點座標依景點 uid 向 Neo4j 查。
         ///
         /// Request 範例：
         ///
@@ -48,11 +49,11 @@ namespace backend.Controllers
         // API：取得地圖（GetMap）－回傳指定劇本的地圖節點與探索進度
         [HttpGet("{story_id:int}")]
         [ProducesResponseType(typeof(ResultViewModel<MapResponse>), 200)]
-        public IActionResult GetMap(int story_id)
+        public async Task<IActionResult> GetMap(int story_id)
         {
             try
             {
-                MapResponse result = _service.GetMap(story_id, User);
+                MapResponse result = await _service.GetMap(story_id, User);
 
                 return Ok(new ResultViewModel<MapResponse>
                 {
@@ -63,7 +64,7 @@ namespace backend.Controllers
             }
             catch (UnauthorizedAccessException e)
             {
-                return Unauthorized(new ResultViewModel<MapResponse>
+                return StatusCode(403, new ResultViewModel<MapResponse>
                 {
                     isSuccess = false,
                     message = e.Message,
@@ -92,6 +93,7 @@ namespace backend.Controllers
         /// </summary>
         /// <remarks>
         /// 對應「地圖」頁面點擊節點後的抵達解鎖流程，成功後解鎖該節點詳情。
+        /// 只有劇本擁有者或協作隊員可以抵達（403）；只能抵達已解鎖的站，且要在景點 200 公尺內（400）。
         ///
         /// Request 範例：
         ///
@@ -105,7 +107,7 @@ namespace backend.Controllers
         // API：GPS 確認抵達（Arrive）－驗證座標後解鎖指定節點
         [HttpPost("Node/{node_id:int}/Arrive")]
         [ProducesResponseType(typeof(ResultViewModel<NodeDetailResponse>), 200)]
-        public IActionResult Arrive(
+        public async Task<IActionResult> Arrive(
             int node_id,
             [FromQuery] double lat,
             [FromQuery] double lng)
@@ -113,7 +115,7 @@ namespace backend.Controllers
             try
             {
                 NodeDetailResponse result =
-                    _service.ArriveNode(node_id, lat, lng, User);
+                    await _service.ArriveNode(node_id, lat, lng, User);
 
                 return Ok(new ResultViewModel<NodeDetailResponse>
                 {
@@ -124,7 +126,7 @@ namespace backend.Controllers
             }
             catch (UnauthorizedAccessException e)
             {
-                return Unauthorized(new ResultViewModel<NodeDetailResponse>
+                return StatusCode(403, new ResultViewModel<NodeDetailResponse>
                 {
                     isSuccess = false,
                     message = e.Message,
@@ -267,12 +269,12 @@ namespace backend.Controllers
         // API：導航（Navigate）－回傳前往指定節點的路線資訊
         [HttpPost("Navigate")]
         [ProducesResponseType(typeof(ResultViewModel<NavigationResponse>), 200)]
-        public IActionResult Navigate([FromBody] NavigationRequest req)
+        public async Task<IActionResult> Navigate([FromBody] NavigationRequest req)
         {
             try
             {
                 NavigationResponse result =
-                    _service.GetNavigation(req);
+                    await _service.GetNavigation(req);
 
                 return Ok(new ResultViewModel<NavigationResponse>
                 {

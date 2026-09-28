@@ -25,6 +25,22 @@ namespace backend.ViewModels
         public string opening_hours { get; set; }
     }
 
+    /// <summary>
+    /// 商家註冊時選「都沒有，我要建立新的」景點要帶的資料：版本鏈欄位 + 座標與分類。
+    /// 座標必填（行程規劃、地圖與任務位置驗證都靠它）；分類影響任務類型判斷（Restaurant 會加地方美食型）。
+    /// </summary>
+    public class MerchantNewPlace : MerchantPlaceFields
+    {
+        /// <summary>緯度（必填，建議由前端地圖選點取得）</summary>
+        public double? lat { get; set; }
+
+        /// <summary>經度（必填）</summary>
+        public double? lng { get; set; }
+
+        /// <summary>景點分類：Attraction / Restaurant / Hotel / Event，不帶時預設 Restaurant</summary>
+        public string category { get; set; }
+    }
+
     /// <summary>單一圖片資訊，對應 Neo4j (:Image) 節點。</summary>
     public class PlaceImageItem
     {

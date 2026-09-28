@@ -39,12 +39,6 @@ namespace backend.ViewModels
 
     #region 完整還原外部 AI 服務回傳的劇本藍圖結構（欄位一個都不能少）
 
-    public class ScriptBlueprintApiResponse
-    {
-        public string status { get; set; }
-        public ScriptBlueprintData data { get; set; }
-    }
-
     /// <summary>劇本完整內容（與 AI 原始生成格式相同）</summary>
     public class ScriptBlueprintData
     {

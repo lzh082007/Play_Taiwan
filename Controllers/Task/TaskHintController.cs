@@ -29,13 +29,18 @@ namespace backend.Controllers
         #region 取得任務提示
 
         /// <summary>
-        /// 依玩家目前答錯次數，取得對應階段的線索提示。
+        /// 【前端不用接】依玩家目前答錯次數，取得任務的線索提示（task.task_hint）。
         /// </summary>
         /// <remarks>
+        /// **前端不用接**：答錯次數要由前端傳入，前端拿不到這個數字。請改用 GET api/Task/{task_id}/Hint（依 Token 自動判斷答錯次數），
+        /// 是否可以取提示看節點遊玩畫面（GET api/Task/Node/{node_id}）每一題的 hint_available。
+        ///
+        /// 答錯至少一次才會給提示。
+        ///
         /// Request 範例：
         ///
         ///     POST /api/TaskHint/GetHint
-        ///     { "taskId": "task_confucius_001", "wrongCount": 2 }
+        ///     { "taskId": "1", "wrongCount": 1 }
         /// </remarks>
         /// <param name="request">任務識別碼與目前答錯次數。</param>
         /// <returns>提示內容，若尚未達到提示門檻則 Available 為 false。</returns>

@@ -6,34 +6,38 @@ using System.Security.Claims;
 using System.Threading.Tasks;
 using backend.dao;
 using backend.Models;
+using backend.Services.Neo4j;
 using backend.utils;
 
 namespace backend.Services
 {
     public class MapService
     {
-        private const double UnlockRadiusMeters = 50.0;
+        // 抵達判定距離，與任務作答共用（PlayRules）
+        private const double UnlockRadiusMeters = PlayRules.ArrivalRadiusMeters;
 
         private readonly MapDao _dao;
         private readonly GeocodingService _geocodingService;
+        private readonly PlaceLookupService _placeLookup;
 
-        public MapService(MapDao dao, GeocodingService geocodingService)
+        public MapService(MapDao dao, GeocodingService geocodingService, PlaceLookupService placeLookup)
         {
             _dao = dao;
             _geocodingService = geocodingService;
+            _placeLookup = placeLookup;
         }
 
         #region 取得地圖
 
         /// <summary>
-        /// 取得指定劇本的地圖資訊。
-        /// 後端依 story_session.ss_current 判斷節點是否解鎖。
+        /// 取得指定劇本的地圖資訊。只有劇本擁有者或協作隊員可以查看。
+        /// 後端依 story_session.ss_current 判斷節點是否解鎖，座標依節點的 place_id 向 Neo4j 查。
         /// 新資料表沒有 day_index，目前所有節點都歸在第一日。
         /// </summary>
         /// <param name="storyId">劇本代號，對應 story.s_id。</param>
         /// <param name="user">目前登入使用者 JWT Claims。</param>
         /// <returns>地圖進度、節點、明信片統計與總天數。</returns>
-        public MapResponse GetMap(
+        public async Task<MapResponse> GetMap(
             int storyId,
             ClaimsPrincipal user)
         {
@@ -46,6 +50,23 @@ namespace backend.Services
                 throw new KeyNotFoundException("此劇本沒有可用的地圖節點。");
             }
 
+            if (!_dao.CanPlay(auId, storyId))
+            {
+                throw new UnauthorizedAccessException("你沒有參與這個劇本，無法查看地圖。");
+            }
+
+            Dictionary<string, PlaceLookupService.PlaceInfo> places =
+                await _placeLookup.GetPlacesAsync(nodes.Select(x => x.place_id));
+
+            foreach (MapNode node in nodes)
+            {
+                if (node.place_id != null && places.TryGetValue(node.place_id, out PlaceLookupService.PlaceInfo place))
+                {
+                    node.lat = place.lat;
+                    node.lng = place.lng;
+                }
+            }
+
             int currentNodeOrder = _dao.GetCurrentNodeOrder(auId, storyId);
 
             nodes = nodes
@@ -55,11 +76,8 @@ namespace backend.Services
 
             foreach (MapNode node in nodes)
             {
-                // 第一個節點固定開放。
-                // 玩家完成第 N 節點後，開放第 N+1 節點。
-                node.is_unlocked =
-                    node.node_order == 1 ||
-                    node.node_order <= currentNodeOrder + 1;
+                // 第一個節點固定開放；抵達第 N 節點後開放第 N+1 節點（協作隊伍全隊共用進度）。
+                node.is_unlocked = TeamProgress.IsUnlocked(node.node_order, currentNodeOrder);
 
                 // 已解鎖後不再顯示迷霧文字。
                 if (node.is_unlocked)
@@ -68,7 +86,7 @@ namespace backend.Services
                 }
                 else if (string.IsNullOrWhiteSpace(node.fog_hint))
                 {
-                    node.fog_hint = "前方仍被迷霧籠罩，完成前一站任務後即可探索。";
+                    node.fog_hint = "前方仍被迷霧籠罩，抵達前一站後即可探索。";
                 }
 
                 node.child_node_ids ??= new List<int>();
@@ -109,7 +127,11 @@ namespace backend.Services
 
         #region GPS 確認抵達
 
-        public NodeDetailResponse ArriveNode(
+        /// <summary>
+        /// GPS 確認抵達：只有劇本擁有者或協作隊員可以抵達，且只能抵達已解鎖的站；
+        /// 距離以節點 place_id 在 Neo4j 的座標計算（與任務作答同一份座標）。
+        /// </summary>
+        public async Task<NodeDetailResponse> ArriveNode(
             int nodeId,
             double userLat,
             double userLng,
@@ -124,16 +146,29 @@ namespace backend.Services
                 throw new KeyNotFoundException("找不到指定節點。");
             }
 
-            if (node.lat == 0 || node.lng == 0)
+            int storyId = _dao.GetNodeStoryId(nodeId) ?? throw new KeyNotFoundException("找不到指定節點。");
+
+            if (!_dao.CanPlay(auId, storyId))
             {
-                throw new InvalidOperationException("此節點尚未設定有效座標。");
+                throw new UnauthorizedAccessException("你沒有參與這個劇本，無法抵達節點。");
             }
+
+            // 只能抵達已解鎖的站，避免直接跳到後面的站把進度推過去
+            int currentNodeOrder = _dao.GetCurrentNodeOrder(auId, storyId);
+
+            if (!TeamProgress.IsUnlocked(node.node_order, currentNodeOrder))
+            {
+                throw new InvalidOperationException("這一站還沒解鎖，請先抵達前一站。");
+            }
+
+            PlaceLookupService.PlaceInfo place = await _placeLookup.GetPlaceAsync(node.place_id)
+                ?? throw new InvalidOperationException("查不到此節點的景點座標，無法確認抵達。");
 
             double distance = CalculateDistanceMeters(
                 userLat,
                 userLng,
-                node.lat,
-                node.lng);
+                place.lat,
+                place.lng);
 
             if (distance > UnlockRadiusMeters)
             {
@@ -190,7 +225,7 @@ namespace backend.Services
 
         #region 導航
 
-        public NavigationResponse GetNavigation(NavigationRequest req)
+        public async Task<NavigationResponse> GetNavigation(NavigationRequest req)
         {
             if (req == null || req.node_id <= 0)
             {
@@ -204,15 +239,13 @@ namespace backend.Services
                 throw new KeyNotFoundException("找不到指定導航節點。");
             }
 
-            if (node.lat == 0 || node.lng == 0)
-            {
-                throw new InvalidOperationException("此景點尚未設定有效座標。");
-            }
+            PlaceLookupService.PlaceInfo place = await _placeLookup.GetPlaceAsync(node.place_id)
+                ?? throw new InvalidOperationException("查不到此景點的座標。");
 
             return new NavigationResponse
             {
                 maps_deeplink_url =
-                    $"https://www.google.com/maps/search/?api=1&query={node.lat},{node.lng}"
+                    $"https://www.google.com/maps/search/?api=1&query={place.lat},{place.lng}"
             };
         }
 

@@ -222,13 +222,13 @@ namespace backend.Services.Neo4j
         }
 
         /// <summary>
-        /// 商家註冊時選「都沒有，我要建立新的」景點：建立一顆全新身分節點（:Place:MerchantPlace）
+        /// 商家註冊時選「都沒有，我要建立新的」景點：建立一顆全新身分節點（:Place:MerchantPlace，帶座標）
         /// 加一顆 source='merchant' 的 :Current 版本節點，回傳新產生的 uid。
         /// </summary>
-        public async Task<string> CreateMerchantPlaceAsync(MerchantPlaceFields fields, string submittedBy)
+        public async Task<string> CreateMerchantPlaceAsync(MerchantNewPlace fields, string submittedBy)
         {
             const string query = @"
-                CREATE (a:Place:MerchantPlace {uid: randomUUID()})
+                CREATE (a:Place:MerchantPlace {uid: randomUUID(), lat: $lat, lon: $lon})
                 CREATE (v:Place:Version:Current {
                     version_id: randomUUID(),
                     version_no: 1,
@@ -249,6 +249,8 @@ namespace backend.Services.Neo4j
 
             var rows = await _gateway.ExecuteCypherAsync(query, new
             {
+                lat = fields.lat,
+                lon = fields.lng,
                 name = fields.name,
                 address = fields.address,
                 description = fields.description,
@@ -263,7 +265,8 @@ namespace backend.Services.Neo4j
 
         /// <summary>
         /// 商家刪除帳號時清理 Neo4j 側資料：
-        /// - 若身分節點是商家自建的（:MerchantPlace），整條身分節點連同所有版本節點一併刪除。
+        /// - 若身分節點是商家自建的（:MerchantPlace），保留節點與版本（舊劇本還要用座標與名稱），
+        ///   只標成已刪除（is_deleted = true、deleted_at）；商家資料已刪，行程規劃不會再排入。
         /// - 若是政府開放資料的景點，只刪除商家自己的 :Current 版本節點，絕對不動原始身分節點。
         /// </summary>
         public async Task DeleteMerchantVersionAsync(string uid)
@@ -281,12 +284,11 @@ namespace backend.Services.Neo4j
 
             if (labels.Contains("MerchantPlace"))
             {
-                const string deleteAllQuery = @"
-                    MATCH (a {uid: $uid})
-                    OPTIONAL MATCH (a)-[:HAS_VERSION]->(v)
-                    DETACH DELETE v, a
+                const string markDeletedQuery = @"
+                    MATCH (a:MerchantPlace {uid: $uid})
+                    SET a.is_deleted = true, a.deleted_at = datetime()
                 ";
-                await _gateway.ExecuteCypherAsync(deleteAllQuery, new { uid });
+                await _gateway.ExecuteCypherAsync(markDeletedQuery, new { uid });
             }
             else
             {

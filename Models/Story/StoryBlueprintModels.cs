@@ -315,21 +315,11 @@ public class ConfirmStoryRequest
         /// <summary>行政區名稱</summary>
         public string detected_town { get; set; }
 
-        /// <summary>生成的劇本清單（數量依 story_count，AI 回傳空內容的那份會略過）</summary>
-        public List<GeneratedStoryItem> stories { get; set; }
-    }
-
-    /// <summary>生成的一份劇本</summary>
-    public class GeneratedStoryItem
-    {
-        /// <summary>劇本代號（story.s_id），之後查詳情、確認選卷都用這個</summary>
-        public int story_id { get; set; }
-
-        /// <summary>AI 服務回傳的狀態，例如「success」</summary>
-        public string status { get; set; }
-
-        /// <summary>劇本完整內容</summary>
-        public ScriptBlueprintData data { get; set; }
+        /// <summary>
+        /// 生成的劇本清單（數量依 story_count，AI 回傳空內容的那份會略過），格式與 GenerateGameStory 相同；
+        /// 每份的 story_id 用來查詳情、確認選卷，task_db_id 是作答用的任務代號。
+        /// </summary>
+        public List<GameStoryResult> stories { get; set; }
     }
 
     /// <summary>自然語言生成劇本（遊你說了算）結果</summary>
