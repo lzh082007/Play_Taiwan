@@ -24,16 +24,54 @@ namespace backend.Controllers
         private readonly ILogger<TaskController> _logger;
         private readonly TaskService _service;
         private readonly TaskGenerationService _taskGeneration;
+        private readonly TaskDifficultyService _difficulty;
 
         public TaskController(
             ILogger<TaskController> logger,
             TaskService service,
-            TaskGenerationService taskGeneration)
+            TaskGenerationService taskGeneration,
+            TaskDifficultyService difficulty)
         {
             _logger = logger;
             _service = service;
             _taskGeneration = taskGeneration;
+            _difficulty = difficulty;
         }
+
+        #region 題型解鎖進度
+
+        /// <summary>
+        /// 取得登入者在目前所在鄉鎮市區的題型解鎖進度（產生劇本前顯示用）。
+        /// </summary>
+        /// <remarks>
+        /// 需要登入。後端用座標找出所在的縣市／鄉鎮市區（Neo4j 最近景點的行政區，查不到時用反向地理編碼），
+        /// 再看登入者有沒有在這個區抵達過任何一站（或在這個區作答過）。
+        ///
+        /// 第一次到的區，產生劇本時這個區的景點不會出 e人訪談型，locked_types 會列出並附上解鎖條件（unlock_hint）；
+        /// 在這個區抵達任一站後就解鎖。查不到所在區時 city_name、district_name 為 null，並當作第一次到。
+        ///
+        ///     GET /api/Task/Progress?lat=24.1437&amp;lng=120.6736
+        /// </remarks>
+        /// <param name="lat">玩家目前緯度。</param>
+        /// <param name="lng">玩家目前經度。</param>
+        [Authorize]
+        [HttpGet]
+        [Route("Progress")]
+        [ProducesResponseType(typeof(ResultViewModel<TaskProgressResponse>), 200)]
+        public async Task<IActionResult> GetProgress([FromQuery] double lat, [FromQuery] double lng)
+        {
+            if (lat < -90 || lat > 90 || lng < -180 || lng > 180 || (lat == 0 && lng == 0))
+                throw new BadRequestException("請提供正確的 lat、lng");
+
+            return Ok(new ResultViewModel<TaskProgressResponse>
+            {
+                isSuccess = true,
+                message = "查詢成功",
+                Result = await _difficulty.GetProgressAsync(User.GetAuId(), lat, lng)
+            });
+        }
+
+        #endregion
 
         #region 節點遊玩畫面
 
@@ -224,7 +262,10 @@ namespace backend.Controllers
         /// </summary>
         /// <remarks>
         /// 後端依登入者（JWT）在此任務的實際答錯次數（user_task_record）決定是否給提示：
-        /// 答錯一次後回傳 task.task_hint；尚未答錯時 is_available 為 false。
+        /// 答錯次數達到門檻後回傳 task.task_hint，還沒達到時 is_available 為 false。
+        /// 門檻＝題目難易度（協作解謎 0 次、文化問答／商家知識問答／圖像地理猜謎 1 次、景點猜猜樂 2 次）
+        /// 加上登入者最近的答題表現（常卡關 -1、很順利 +1），最少 0 次、選擇題最多 2 次；
+        /// 沒有對錯的題型（跨關集結、創意攝影、地方美食、e人訪談）一開始就能看。
         ///
         /// Request 範例：
         ///

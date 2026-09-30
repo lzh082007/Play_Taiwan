@@ -120,6 +120,8 @@ namespace backend
             services.AddScoped<dao.TaskDao>();
             services.AddScoped<Services.ITaskVerificationService, Services.TaskVerificationService>();
             services.AddScoped<Services.TaskGenerationService>();
+            services.AddScoped<Services.TaskDifficultyService>();
+            services.AddScoped<dao.TaskDifficultyDao>();
 
             services.AddSingleton<Services.IVisionApiClient, Services.FakeVisionApiClient>();
             services.AddSingleton<Services.IPoseCompareClient, Services.FakePoseCompareClient>();
@@ -181,6 +183,7 @@ namespace backend
             // 這四個原本沒註冊，導致 MerchantController 與 MerchantVlogController
             // 每次請求都在 DI 解析時就失敗。
             services.AddScoped<Services.MerchantService>();
+            services.AddScoped<Services.StoreLocationService>();
             services.AddScoped<dao.MerchantDao>();
             services.AddScoped<Services.MerchantVlogService>();
             services.AddScoped<dao.VlogDao>();

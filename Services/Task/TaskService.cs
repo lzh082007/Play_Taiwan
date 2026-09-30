@@ -15,11 +15,13 @@ namespace backend.Services
     public class TaskService(
         TaskDao task_dao_obj,
         ITaskVerificationService verification,
-        PlaceLookupService place_lookup_obj)
+        PlaceLookupService place_lookup_obj,
+        TaskDifficultyService difficulty_obj)
     {
         private readonly TaskDao task_dao = task_dao_obj;
         private readonly ITaskVerificationService _verification = verification;
         private readonly PlaceLookupService place_lookup = place_lookup_obj;
+        private readonly TaskDifficultyService _difficulty = difficulty_obj;
 
         #region 節點遊玩畫面
         /// <summary>
@@ -42,6 +44,7 @@ namespace backend.Services
                 task_dao.GetTaskPlayerStats(auId, tasks.Select(t => t.task_id).ToList());
 
             NodeProgress progress = task_dao.GetNodeProgress(snId);
+            PlayerPerformance performance = _difficulty.GetPerformance(auId);
 
             return new NodePlayResponse
             {
@@ -73,7 +76,8 @@ namespace backend.Services
                             .ToList(),
                         pass = t.pass,
                         wrong_count = wrongCount,
-                        hint_available = t.pass == 0 && wrongCount >= 1 && hasHint
+                        hint_available = t.pass == 0 && hasHint
+                            && wrongCount >= TaskDifficultyService.HintUnlockWrongCount(t.type_id, performance)
                     };
                 }).ToList()
             };
@@ -215,16 +219,19 @@ namespace backend.Services
         #region 取得提示
 
         /// <summary>
-        /// 依玩家在此任務的答錯次數（user_task_record）決定是否給提示：答錯一次後才顯示 task.task_hint。
+        /// 依玩家在此任務的答錯次數（user_task_record）決定是否給提示：答錯次數達到門檻後才顯示 task.task_hint。
+        /// 門檻依題目難易度與玩家表現決定（TaskDifficultyService.HintUnlockWrongCount）。
         /// </summary>
         public TaskHintResponse GetHint(int auId, int taskId)
         {
             int wrongCount = task_dao.GetWrongCount(auId, taskId);
             string hint = task_dao.GetTaskHint(taskId);
+            int hintWrongCount = TaskDifficultyService.HintUnlockWrongCount(
+                task_dao.GetTaskTypeId(taskId), _difficulty.GetPerformance(auId));
 
-            if (wrongCount < 1)
+            if (wrongCount < hintWrongCount)
             {
-                return new TaskHintResponse { task_id = taskId.ToString(), hint_text = "答錯一次後就能取得提示。", is_available = false };
+                return new TaskHintResponse { task_id = taskId.ToString(), hint_text = $"答錯 {hintWrongCount} 次後就能取得提示。", is_available = false };
             }
 
             return new TaskHintResponse
@@ -235,18 +242,6 @@ namespace backend.Services
             };
         }
 
-        #endregion
-
-        #region 動態難度
-        public int RecordVisitAndGetDifficulty(string ep_id, string region_id)
-        {
-            return task_dao.RecordVisitAndGetDifficulty(ep_id, region_id);
-        }
-
-        public string GetDifficultyPrompt(int star)
-        {
-            return task_dao.GetDifficultyPrompt(star);
-        }
         #endregion
 
         #region 獎章抽取

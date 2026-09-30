@@ -124,6 +124,126 @@ namespace backend.Services.Neo4j
             return rows.Select(ToPlaceInfo).Where(p => p != null).ToList();
         }
 
+        public class PlaceDistrict
+        {
+            public string city_name { get; set; }
+            public string district_name { get; set; }
+        }
+
+        // 找最近景點的範圍（經緯度各 ±0.03 度，約 3 公里）
+        private const double NearestDistrictSearchDegrees = 0.03;
+
+        /// <summary>
+        /// 景點所屬的縣市／鄉鎮市區（key = place_id）：用 (Place)-[:LOCATED_IN_TOWN]->(Town)-[:PART_OF]->(City)；
+        /// 沒掛行政區的景點（約 1000 筆政府資料缺漏、改版前建立的商家自建景點）改取座標附近最近一個有行政區的景點。
+        /// MySQL place 表的景點（place-{p_id}）、查不到或附近沒有景點的不會出現在結果裡。
+        /// </summary>
+        public async Task<Dictionary<string, PlaceDistrict>> GetPlaceDistrictsAsync(IEnumerable<string> placeIds)
+        {
+            List<string> uids = (placeIds ?? Enumerable.Empty<string>())
+                .Where(id => !string.IsNullOrWhiteSpace(id) && !id.StartsWith(MySqlPlacePrefix))
+                .Distinct()
+                .ToList();
+
+            var result = new Dictionary<string, PlaceDistrict>();
+            if (uids.Count == 0) return result;
+
+            var rows = await _gateway.ExecuteCypherAsync(@"
+                MATCH (p:Place) WHERE p.uid IN $uids
+                OPTIONAL MATCH (p)-[:LOCATED_IN_TOWN]->(t:Town)
+                OPTIONAL MATCH (t)-[:PART_OF]->(c:City)
+                WITH p, head(collect(t)) AS townNode, head(collect(c.name)) AS city
+                RETURN p.uid AS uid,
+                       townNode.name AS town, townNode.id AS town_id, city,
+                       coalesce(p.lat, p.PositionLat) AS lat,
+                       coalesce(p.lon, p.PositionLon) AS lon", new { uids });
+
+            var withoutTown = new List<Dictionary<string, object>>();
+
+            foreach (var row in rows)
+            {
+                string uid = Neo4jValueConverter.AsString(row.GetValueOrDefault("uid"));
+                if (string.IsNullOrWhiteSpace(uid)) continue;
+
+                PlaceDistrict district = ToPlaceDistrict(row);
+                if (district != null)
+                {
+                    result[uid] = district;
+                    continue;
+                }
+
+                double? lat = Neo4jValueConverter.AsDouble(row.GetValueOrDefault("lat"));
+                double? lng = Neo4jValueConverter.AsDouble(row.GetValueOrDefault("lon"));
+                if (lat.HasValue && lng.HasValue)
+                    withoutTown.Add(new Dictionary<string, object> { ["key"] = uid, ["lat"] = lat.Value, ["lng"] = lng.Value });
+            }
+
+            foreach (var (uid, district) in await GetNearestDistrictsAsync(withoutTown))
+                result[uid] = district;
+
+            return result;
+        }
+
+        /// <summary>座標所在的縣市／鄉鎮市區：取附近最近一個有行政區的景點，附近沒有景點時回傳 null。</summary>
+        public async Task<PlaceDistrict> GetDistrictByCoordinatesAsync(double lat, double lng)
+        {
+            var points = new List<Dictionary<string, object>>
+            {
+                new Dictionary<string, object> { ["key"] = "here", ["lat"] = lat, ["lng"] = lng }
+            };
+            return (await GetNearestDistrictsAsync(points)).GetValueOrDefault("here");
+        }
+
+        /// <summary>每個座標（key、lat、lng）各自取附近最近一個有行政區的景點的縣市／鄉鎮市區。</summary>
+        private async Task<Dictionary<string, PlaceDistrict>> GetNearestDistrictsAsync(List<Dictionary<string, object>> points)
+        {
+            var result = new Dictionary<string, PlaceDistrict>();
+            if (points.Count == 0) return result;
+
+            var rows = await _gateway.ExecuteCypherAsync(@"
+                UNWIND $points AS pt
+                CALL {
+                    WITH pt
+                    MATCH (q:Place)-[:LOCATED_IN_TOWN]->(t:Town)
+                    WITH pt, t, coalesce(q.lat, q.PositionLat) AS qLat, coalesce(q.lon, q.PositionLon) AS qLon
+                    WHERE qLat >= pt.lat - $delta AND qLat <= pt.lat + $delta
+                      AND qLon >= pt.lng - $delta AND qLon <= pt.lng + $delta
+                    WITH t, point.distance(point({latitude: pt.lat, longitude: pt.lng}),
+                                           point({latitude: qLat, longitude: qLon})) AS distance_m
+                    ORDER BY distance_m ASC
+                    LIMIT 1
+                    OPTIONAL MATCH (t)-[:PART_OF]->(c:City)
+                    RETURN t.name AS town, t.id AS town_id, c.name AS city
+                }
+                RETURN pt.key AS key, town, town_id, city", new { points, delta = NearestDistrictSearchDegrees });
+
+            foreach (var row in rows)
+            {
+                string key = Neo4jValueConverter.AsString(row.GetValueOrDefault("key"));
+                PlaceDistrict district = ToPlaceDistrict(row);
+                if (!string.IsNullOrWhiteSpace(key) && district != null) result[key] = district;
+            }
+
+            return result;
+        }
+
+        /// <summary>Town.id 是「縣市_鄉鎮市區」，Town 沒掛 City 時從 id 取縣市</summary>
+        private static PlaceDistrict ToPlaceDistrict(Dictionary<string, object> row)
+        {
+            string town = Neo4jValueConverter.AsString(row.GetValueOrDefault("town"));
+            if (string.IsNullOrWhiteSpace(town)) return null;
+
+            string city = Neo4jValueConverter.AsString(row.GetValueOrDefault("city"));
+            if (string.IsNullOrWhiteSpace(city))
+            {
+                string townId = Neo4jValueConverter.AsString(row.GetValueOrDefault("town_id")) ?? "";
+                int split = townId.IndexOf('_');
+                city = split > 0 ? townId.Substring(0, split) : null;
+            }
+
+            return new PlaceDistrict { city_name = city, district_name = town };
+        }
+
         private static PlaceInfo ToPlaceInfo(Dictionary<string, object> row)
         {
             string uid = Neo4jValueConverter.AsString(row.GetValueOrDefault("uid"));

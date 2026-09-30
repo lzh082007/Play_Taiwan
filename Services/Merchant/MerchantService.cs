@@ -18,17 +18,20 @@ namespace backend.Services
     {
         private readonly MerchantDao _dao;
         private readonly PlaceVersionChainService _placeService;
+        private readonly StoreLocationService _storeLocation;
         private readonly AppSettings _appSettings;
         private readonly ILogger<MerchantService> _logger;
 
         public MerchantService(
             MerchantDao dao,
             PlaceVersionChainService placeService,
+            StoreLocationService storeLocation,
             IOptions<AppSettings> appSettings,
             ILogger<MerchantService> logger)
         {
             _dao = dao;
             _placeService = placeService;
+            _storeLocation = storeLocation;
             _appSettings = appSettings.Value;
             _logger = logger;
         }
@@ -49,9 +52,20 @@ namespace backend.Services
                 throw new BadRequestException("請擇一提供 place_uid（選擇既有景點）或 new_place（建立新景點）");
             }
 
+            // 自建景點：地址、座標只填一個時自動轉另一個（轉不了回 400），在建立任何資料前先算好
+            MerchantPlaceLocation newPlaceLocation = null;
             if (hasNewPlace)
             {
                 ValidateNewPlace(req.new_place);
+
+                string address = string.IsNullOrWhiteSpace(req.store_address) ? req.new_place.address : req.store_address;
+                newPlaceLocation = await _storeLocation.ResolveAsync(req.store_city, req.store_town, address, req.new_place.lat, req.new_place.lng);
+
+                // 商家沒填的由轉出來的位置補上，店家資料與景點版本節點的地址才會跟座標一致
+                req.store_city = FirstNonBlank(req.store_city, newPlaceLocation.store_city);
+                req.store_town = FirstNonBlank(req.store_town, newPlaceLocation.store_town);
+                req.store_address = FirstNonBlank(req.store_address, newPlaceLocation.store_address);
+                req.new_place.address = FirstNonBlank(req.new_place.address, req.store_address);
             }
 
             string storeUid;
@@ -66,7 +80,7 @@ namespace backend.Services
             }
             else
             {
-                storeUid = await _placeService.CreateMerchantPlaceAsync(req.new_place, req.store_name);
+                storeUid = await _placeService.CreateMerchantPlaceAsync(req.new_place, newPlaceLocation, req.store_name);
             }
 
             var hashTool = new sha256Hash();
@@ -82,19 +96,12 @@ namespace backend.Services
         private const string DefaultNewPlaceCategory = "Restaurant";
 
         /// <summary>
-        /// 自建景點必須帶座標（行程規劃、地圖與任務位置驗證都靠它），座標要落在臺灣（含離島）範圍內，
+        /// 自建景點的座標選填（地址、座標至少填一個，見 StoreLocationService），有帶時要落在臺灣（含離島）範圍內，
         /// 避免經緯度填反；分類統一成 place_type 使用的寫法。
         /// </summary>
         private static void ValidateNewPlace(MerchantNewPlace place)
         {
-            if (!place.lat.HasValue || !place.lng.HasValue)
-            {
-                throw new BadRequestException("建立新景點時請提供座標（new_place.lat、new_place.lng）");
-            }
-            if (place.lat < 21 || place.lat > 27 || place.lng < 118 || place.lng > 123)
-            {
-                throw new BadRequestException("new_place 的座標不在臺灣範圍內，請確認經緯度是否填反");
-            }
+            StoreLocationService.ValidateCoordinates(place.lat, place.lng, "new_place.lat、new_place.lng");
 
             if (string.IsNullOrWhiteSpace(place.category))
             {
@@ -105,6 +112,8 @@ namespace backend.Services
             string category = NewPlaceCategories.FirstOrDefault(c => string.Equals(c, place.category.Trim(), System.StringComparison.OrdinalIgnoreCase));
             place.category = category ?? throw new BadRequestException("new_place.category 只能是 Attraction、Restaurant、Hotel 或 Event");
         }
+
+        private static string FirstNonBlank(string value, string fallback) => string.IsNullOrWhiteSpace(value) ? fallback : value;
         #endregion
 
         #region 商家資料
@@ -119,12 +128,46 @@ namespace backend.Services
         /// 更新店家資料（只更新有帶值的欄位），並在 Neo4j 建立新的版本節點，讓 QR Code 掃描回傳的商家資訊跟著更新。
         /// 版本節點會寫入完整欄位，所以用更新後的店家資料組內容；電話、網站、營業時間沿用目前版本的值。
         /// 商家自建景點另外同步 MySQL 的 place_type 名稱（題型抽選與任務生成用）；行程規劃、地圖的名稱與座標直接查 Neo4j。
+        /// 商家自建景點改了地址或重新選點時，景點重新掛鄉鎮市區並更新位置：
+        /// 地址、座標都有改就照填的；只改地址會重轉座標；只帶座標會重轉地址（連同縣市、鄉鎮市區寫回店家資料）。
+        /// 新位置在寫入任何資料前就先算好，轉不了時回 400，不會只改到一半。
         /// </summary>
         public async Task UpdateProfileAsync(int sId, MerchantUpdateRequest req)
         {
             if (req.store_name != null && string.IsNullOrWhiteSpace(req.store_name))
             {
                 throw new BadRequestException("店家名稱不可為空白");
+            }
+
+            StoreLocationService.ValidateCoordinates(req.lat, req.lng, "lat、lng");
+
+            MerchantDetailResponse before = _dao.GetById(sId)
+                ?? throw new NotFoundException($"找不到 s_id={sId} 的商家資料");
+
+            PlaceCurrentInfo current = string.IsNullOrWhiteSpace(before.store_uid)
+                ? null
+                : await _placeService.GetCurrentVersionAsync(before.store_uid);
+
+            MerchantPlaceLocation newLocation = null;
+            if (IsSelfBuiltPlace(current))
+            {
+                if (AddressChanged(before, req))
+                {
+                    newLocation = await _storeLocation.ResolveAsync(
+                        req.store_city ?? before.store_city,
+                        req.store_town ?? before.store_town,
+                        req.store_address ?? before.store_address,
+                        req.lat,
+                        req.lng);
+                }
+                else if (req.lat.HasValue)
+                {
+                    // 只重新選點：地址跟著新座標重轉
+                    newLocation = await _storeLocation.ResolveAsync(null, null, null, req.lat, req.lng);
+                    req.store_city = newLocation.store_city;
+                    req.store_town = newLocation.store_town;
+                    req.store_address = newLocation.store_address;
+                }
             }
 
             if (!_dao.Update(sId, req))
@@ -138,12 +181,16 @@ namespace backend.Services
                 return;
             }
 
-            PlaceCurrentInfo current = await _placeService.GetCurrentVersionAsync(store.store_uid);
             Dictionary<string, object> previous = current?.merchant_override;
 
             if (IsSelfBuiltPlace(current))
             {
                 _dao.SyncSelfBuiltPlace(store.store_uid, store.store_name);
+
+                if (newLocation != null)
+                {
+                    await _placeService.UpdateMerchantPlaceLocationAsync(store.store_uid, newLocation);
+                }
             }
 
             var fields = new MerchantPlaceFields
@@ -156,6 +203,14 @@ namespace backend.Services
                 opening_hours = previous?.GetValueOrDefault("opening_hours")?.ToString()
             };
             await _placeService.CreateNewVersionAsync(store.store_uid, fields, "merchant", sId.ToString());
+        }
+
+        /// <summary>縣市／鄉鎮市區／地址是否跟原本不同（前端每次都帶全部欄位時，沒改的不算）</summary>
+        private static bool AddressChanged(MerchantDetailResponse before, MerchantUpdateRequest req)
+        {
+            return (req.store_city != null && req.store_city != before.store_city)
+                || (req.store_town != null && req.store_town != before.store_town)
+                || (req.store_address != null && req.store_address != before.store_address);
         }
 
         /// <summary>商家列表（管理員用）。</summary>

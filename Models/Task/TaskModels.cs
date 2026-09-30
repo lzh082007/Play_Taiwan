@@ -176,7 +176,7 @@ namespace backend.Models
         public List<NodePlayOption> options { get; set; } = new();
         public int pass { get; set; }                  // 0=未通過、1=已通過（協作隊伍共用）
         public int wrong_count { get; set; }           // 自己在這題答錯的次數
-        public bool hint_available { get; set; }       // 是否可以取提示（答錯過、還沒通過、這題有提示）
+        public bool hint_available { get; set; }       // 是否可以取提示（答錯次數達門檻、還沒通過、這題有提示；門檻依題目難易度與玩家表現）
     }
 
     /// <summary>選項（不含正確答案）</summary>
@@ -236,13 +236,21 @@ namespace backend.Models
         public string reward_postcard_id { get; set; }              // 觸發後可獲得的明信片代號
     }
 
-    /// <summary>動態難度 LLM 提示字 (對應 md_difficulty_prompt)。</summary>
-    public class DifficultyPrompt
+    /// <summary>題型解鎖進度（GET api/Task/Progress）：玩家在目前所在鄉鎮市區的題型解鎖狀態</summary>
+    public class TaskProgressResponse
     {
-        public int DifficultyStar { get; set; }              // 難度星級 1~5
-        public string Title { get; set; }                     // 該難度等級的標題名稱
-        public string LlmPromptTemplate { get; set; }          // 給 LLM 依此難度生成內容用的提示詞範本
-        public int RaiseVisitThreshold { get; set; }            // 累積造訪次數達到此門檻後，難度自動提升
+        public string city_name { get; set; }          // 所在縣市，查不到所在區時為 null
+        public string district_name { get; set; }      // 所在鄉鎮市區，查不到所在區時為 null
+        public bool is_first_visit { get; set; }       // 是否第一次到這個區（還沒在這個區抵達過任何一站），查不到所在區時為 true
+        public List<TaskTypeUnlock> unlocked_types { get; set; } = new();
+        public List<TaskTypeUnlock> locked_types { get; set; } = new();
+    }
+
+    public class TaskTypeUnlock
+    {
+        public int type_id { get; set; }
+        public string type_name { get; set; }
+        public string unlock_hint { get; set; }        // 解鎖條件，已解鎖的題型為 null
     }
 
     /// <summary>隱藏關卡 (對應 md_hidden_level)。</summary>
@@ -261,14 +269,5 @@ namespace backend.Models
         public string RewardBadgeId { get; set; }                     // 觸發後可能給予的徽章代號
         public string RewardPostcardId { get; set; }                   // 觸發後可能給予的明信片代號
         public bool IsActive { get; set; }                              // 是否啟用此隱藏關卡
-    }
-
-    /// <summary>探員造訪次數 (對應 ep_visit_count)，用於動態難度判定。</summary>
-    public class VisitCount
-    {
-        public string EpId { get; set; }                     // 探員代號
-        public string RegionId { get; set; }                  // 地區代號
-        public int VisitCountValue { get; set; }                // 累積造訪次數
-        public int CurrentDifficultyStar { get; set; }            // 目前套用的難度星級 1~5
     }
 }

@@ -113,88 +113,11 @@ namespace backend.dao
             return string.IsNullOrWhiteSpace(hint) ? null : hint;
         }
 
-        #endregion
-
-        #region 難度等級
-
-        /// <summary>
-        /// 紀錄玩家到訪地區的累積次數，並由 md_difficulty_prompt 的設定動態調整難度等級。
-        /// </summary>
-        public int RecordVisitAndGetDifficulty(string ep_id, string region_id)
+        /// <summary>任務的題型（task.task_type），任務不存在時回傳 0</summary>
+        public int GetTaskTypeId(int taskId)
         {
-            Hashtable epRegionParam = new()
-            {
-                {"@ep_id", new MySQLParameter(ep_id, MySqlDbType.VarChar)},
-                {"@region_id", new MySQLParameter(region_id, MySqlDbType.VarChar)}
-            };
-
-            string upsertSql = @"
-                INSERT INTO ep_visit_count (ep_id, region_id, visit_count, current_difficulty_star)
-                VALUES (@ep_id, @region_id, 1, 1)
-                ON DUPLICATE KEY UPDATE visit_count = visit_count + 1";
-            mysql_connect.Execute(upsertSql, epRegionParam);
-
-            string visitSql = @"
-                SELECT visit_count FROM ep_visit_count
-                WHERE ep_id = @ep_id AND region_id = @region_id";
-            List<VisitCountRow> visitRows = mysql_connect.GetDataList<VisitCountRow>(visitSql, epRegionParam);
-            int visitCount = visitRows is { Count: > 0 } ? visitRows[0].visit_count : 0;
-
-            Hashtable starParam = new()
-            {
-                {"@visitCount", new MySQLParameter(visitCount, MySqlDbType.Int32)}
-            };
-            string starSql = @"
-                SELECT MAX(difficulty_star) AS max_star FROM md_difficulty_prompt
-                WHERE raise_visit_threshold <= @visitCount AND is_active = 1";
-            List<MaxStarRow> starRows = mysql_connect.GetDataList<MaxStarRow>(starSql, starParam);
-            int newStar = starRows is { Count: > 0 } && starRows[0].max_star.HasValue
-                ? starRows[0].max_star.Value
-                : 1;
-
-            Hashtable updateParam = new()
-            {
-                {"@star", new MySQLParameter(newStar, MySqlDbType.Int32)},
-                {"@ep_id", new MySQLParameter(ep_id, MySqlDbType.VarChar)},
-                {"@region_id", new MySQLParameter(region_id, MySqlDbType.VarChar)}
-            };
-            string updateSql = @"
-                UPDATE ep_visit_count SET current_difficulty_star = @star
-                WHERE ep_id = @ep_id AND region_id = @region_id";
-            mysql_connect.Execute(updateSql, updateParam);
-
-            return newStar;
-        }
-
-        private class VisitCountRow
-        {
-            public int visit_count { get; set; }
-        }
-
-        private class MaxStarRow
-        {
-            public int? max_star { get; set; }
-        }
-
-        /// <summary>由難度等級取得準備給 LLM 的對話提示範本，關聯 md_difficulty_prompt。</summary>
-        public string GetDifficultyPrompt(int difficultyStar)
-        {
-            Hashtable param = new()
-            {
-                {"@star", new MySQLParameter(difficultyStar, MySqlDbType.Int32)}
-            };
-
-            string sql = @"
-                SELECT llm_prompt_template FROM md_difficulty_prompt
-                WHERE difficulty_star = @star AND is_active = 1";
-
-            List<PromptTemplateRow> rows = mysql_connect.GetDataList<PromptTemplateRow>(sql, param);
-            return rows is { Count: > 0 } ? rows[0].llm_prompt_template ?? "" : "";
-        }
-
-        private class PromptTemplateRow
-        {
-            public string llm_prompt_template { get; set; }
+            using var conn = new MySqlConnection(mydb);
+            return conn.ExecuteScalar<int?>("SELECT task_type FROM task WHERE task_id = @taskId;", new { taskId }) ?? 0;
         }
 
         #endregion

@@ -21,16 +21,18 @@ namespace backend.Services
         private readonly ValhallaService _valhallaService;
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly Neo4j.PlaceLookupService _placeLookup;
+        private readonly TaskDifficultyService _difficulty;
 
 
         public StoryService(StoryDao dao, Neo4jService neo4jService, ValhallaService valhallaService, IHttpClientFactory httpClientFactory,
-            Neo4j.PlaceLookupService placeLookup)
+            Neo4j.PlaceLookupService placeLookup, TaskDifficultyService difficulty)
         {
             _dao = dao;
             _neo4jService = neo4jService;
             _valhallaService = valhallaService;
             _httpClientFactory = httpClientFactory;
             _placeLookup = placeLookup;
+            _difficulty = difficulty;
         }
 
 
@@ -528,7 +530,7 @@ namespace backend.Services
         /// 劇本 + 任務一次生成（GenerateGameStory / GenerateByLocation 共用）：
         /// 1. 規劃旅遊行程：交通等時圈找出可到達的景點（含商家自建景點），抽出每份劇本的景點組合並排好順路的參觀順序
         /// 2. 判斷任務類型：照舊架構規則決定每站要出哪些題型；景點在 place_type 標有 9（商家有題庫）時，
-        ///    另外必出一題商家知識問答
+        ///    另外必出一題商家知識問答。隨機題型依玩家紀錄調整（動態難度，見 TaskDifficultyService）
         /// 3. 打包成一包丟給 AI service /api/v1/generate，一次拿回所有劇本
         /// 4. 補上 AI 不回傳的欄位、掛入商家題庫任務，全部寫入資料庫（同一個交易），回傳給前端挑選
         /// </summary>
@@ -550,6 +552,11 @@ namespace backend.Services
                 (await _dao.GetMerchantQuestionsByPlaceIdsAsync(placeIds)).ToLookup(q => q.place_id);
             Dictionary<int, string> typeNames = await _dao.GetTaskTypeNamesAsync();
             List<string> tones = await PickNarrativeTonesAsync(placeSets.Count);
+
+            // 動態難度：玩家第一次到的鄉鎮市區不出 e人訪談型，隨機題型的權重依玩家表現調整
+            TaskDifficultyService.PlayerProfile player = await _difficulty.GetPlayerProfileAsync(auId);
+            HashSet<string> firstVisitPlaces =
+                await _difficulty.GetFirstVisitPlaceIdsAsync(player, placeIds, plan.city_name, plan.town_name);
 
             string TypeName(int id) => typeNames.TryGetValue(id, out string name) && !string.IsNullOrWhiteSpace(name) ? name
                                      : FallbackTypeNames.TryGetValue(id, out string fallback) ? fallback : "";
@@ -576,7 +583,7 @@ namespace backend.Services
                     p_name = a.name,
                     is_hotel = category == "Lodging" || category == "Hotel" ? 1 : 2,
                     is_hidden = 2,
-                    type_list = DecideTaskTypes(rows, category, isLastNode, partySize)
+                    type_list = DecideTaskTypes(rows, category, isLastNode, partySize, player, firstVisitPlaces.Contains(a.uid))
                         .Select(id => new AiTaskTypeRef { type_id = id, type_name = TypeName(id) })
                         .ToList()
                 };
@@ -841,10 +848,12 @@ namespace backend.Services
         /// 2. 最後一站加跨關集結型（2）
         /// 3. 餐廳類景點加地方美食型（4）
         /// 4. 2 人以上加協作解謎型（5）
-        /// 5. 再從景點在 place_type 可出的文化問答型／景點猜猜樂／e人訪談型（6~8）隨機抽一題
+        /// 5. 再從景點在 place_type 可出的文化問答型／景點猜猜樂／e人訪談型（6~8）依權重抽一題：
+        ///    玩家第一次到這個景點的鄉鎮市區時不出 e人訪談型，權重依玩家紀錄調整（TaskDifficultyService.PickRandomType）
         /// 商家知識問答（9）不參加隨機抽取：place_type 有 (景點, 9) 標記時，另外由商家題庫掛入（每站必出）。
         /// </summary>
-        private static List<int> DecideTaskTypes(List<StoryDao.PlaceTaskTypeRow> placeTypes, string category, bool isLastNode, int partySize)
+        private static List<int> DecideTaskTypes(List<StoryDao.PlaceTaskTypeRow> placeTypes, string category, bool isLastNode, int partySize,
+            TaskDifficultyService.PlayerProfile player, bool isFirstVisit)
         {
             var types = new List<int> { CreativePhotoTypeId };
 
@@ -852,14 +861,13 @@ namespace backend.Services
             if (category == "Restaurant") types.Add(LocalFoodTypeId);
             if (partySize >= 2) types.Add(CoopTaskTypeId);
 
-            List<int> randomPool = placeTypes
+            IEnumerable<int> randomPool = placeTypes
                 .Select(r => r.type_id)
-                .Where(id => RandomTaskTypeIds.Contains(id))
-                .Distinct()
-                .ToList();
+                .Where(id => RandomTaskTypeIds.Contains(id));
 
-            if (randomPool.Count > 0)
-                types.Add(randomPool[Random.Shared.Next(randomPool.Count)]);
+            int? picked = TaskDifficultyService.PickRandomType(randomPool, player, isFirstVisit);
+            if (picked.HasValue)
+                types.Add(picked.Value);
 
             return types.Distinct().ToList();
         }
